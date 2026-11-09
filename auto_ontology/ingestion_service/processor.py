@@ -106,6 +106,11 @@ def _removed_schemas(d: dict[str, Any], old: sig.Rows, new: sig.Rows) -> list[st
     return sorted(old_schemas - new_schemas)
 
 
+def _signal_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Compare only keys both signals carry (schemas come and go legitimately)."""
+    return any(before[k] != after[k] for k in before.keys() & after.keys())
+
+
 def judge_deletions(
     database_name: str,
     d: dict[str, Any],
@@ -126,8 +131,13 @@ def judge_deletions(
         return "apply", None
 
     previous_auth = (snapshot or {}).get("auth_signal")
-    if previous_auth is not None and auth is not None and auth != previous_auth:
-        if (snapshot or {}).get("pending_auth_signal") == auth:
+    if (
+        previous_auth is not None
+        and auth is not None
+        and _signal_changed(previous_auth, auth)
+    ):
+        pending_auth = (snapshot or {}).get("pending_auth_signal")
+        if pending_auth is not None and not _signal_changed(pending_auth, auth):
             logger.warning(
                 "schema-watch %s: account/permission signal changed and repeated; "
                 "accepting the new signal and applying deletions",
@@ -730,8 +740,13 @@ def _run(connector: Any, report: RunReport, lock: WriteLock) -> None:
 
     lock.stage("judge")
     d = sig.diff(old_rows, new_rows)
-    removed_schema_names = sorted({k[0] for k in d["removed_tables"]})
-    auth = sig.auth_signal(connector, removed_schema_names)
+    # Over every schema the catalog knows, so the signal's keys stay the same
+    # from run to run (a set that depended on this run's deletions would always
+    # differ from the previous run's).
+    known_schemas = sorted(
+        {r[0] for r in old_rows["tables"]} | {r[0] for r in new_rows["tables"]}
+    )
+    auth = sig.auth_signal(connector, known_schemas)
     present = (
         {
             (r.get("table_schema"), r.get("table_name"))

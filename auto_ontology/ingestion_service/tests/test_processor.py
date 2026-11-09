@@ -635,3 +635,11 @@ def test_changed_tables_are_recompiled_except_protected(
     assert seen["retry"] == [auto["table_id"]]
     assert retry.result == "succeeded"
     assert st.open_failures(c.database_name) == []
+
+
+def test_signal_with_new_schema_key_is_not_a_change():
+    before = {"login_name": "sasa", "db_view_definition": 1}
+    after = {"login_name": "sasa", "db_view_definition": 1, "schema:dbo": [1, 1]}
+    assert not processor._signal_changed(before, after)
+    assert processor._signal_changed(before, {**after, "login_name": "reader"})
+    assert processor._signal_changed({"schema:dbo": [1, 1]}, {"schema:dbo": [0, 1]})
