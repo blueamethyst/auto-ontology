@@ -219,3 +219,72 @@ def test_preview_mode_reports_over_limit_instead_of_413(
     assert body["over_limit"] is True
     assert body["total_count"] == 100
     assert len(body["rows"]) == 10
+
+
+def _fake_fp(target_db: str) -> dict[str, Any]:
+    return {
+        "content_hash": "c" * 64,
+        "config_hash": "g" * 64,
+        "structure_hash": "s" * 64,
+        "structure_rows": 10,
+        "counts": {},
+        "validated_at": "2026-11-09T00:00:00+00:00",
+    }
+
+
+def test_fingerprint_response_and_memo(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from auto_ontology.dal import fingerprint as fp
+
+    calls: list[str] = []
+
+    def compute(target_db: str) -> dict[str, Any]:
+        calls.append(target_db)
+        return _fake_fp(target_db)
+
+    monkeypatch.setattr(fp, "compute_fingerprint", compute)
+    monkeypatch.setattr(sql_router, "_fingerprint_memo", {})
+    monkeypatch.setenv("AO_BUILD_VERSION", "abc123")
+    body = client.get(
+        "/api/catalog/fingerprint", params={"target_db": "wow2rpt"}
+    ).json()
+    assert body["state"] == "ready"
+    assert body["build"] == "abc123"
+    assert body["structure_hash"] == "s" * 64
+    assert len(body["version"]) == 16
+    assert body["warnings"] == []
+    client.get("/api/catalog/fingerprint", params={"target_db": "wow2rpt"})
+    assert len(calls) == 1  # memoised
+    client.get(
+        "/api/catalog/fingerprint", params={"target_db": "wow2rpt", "fresh": "true"}
+    )
+    assert len(calls) == 2
+
+
+def test_fingerprint_unknown_build_warns(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from auto_ontology.dal import fingerprint as fp
+
+    monkeypatch.setattr(fp, "compute_fingerprint", _fake_fp)
+    monkeypatch.setattr(sql_router, "_fingerprint_memo", {})
+    monkeypatch.delenv("AO_BUILD_VERSION", raising=False)
+    body = client.get(
+        "/api/catalog/fingerprint", params={"target_db": "wow2rpt", "fresh": "true"}
+    ).json()
+    assert body["build"] == "unknown"
+    assert body["state"] == "ready"
+    assert body["warnings"]
+
+
+def test_fingerprint_refuses_other_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AO_SQL_EXECUTE_ALLOWED_IPS", raising=False)
+    app = FastAPI()
+    app.include_router(sql_router.router, prefix="/api")
+    response = TestClient(app).get(
+        "/api/catalog/fingerprint", params={"target_db": "x"}
+    )
+    assert response.status_code == 403

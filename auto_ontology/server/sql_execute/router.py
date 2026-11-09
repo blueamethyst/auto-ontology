@@ -107,6 +107,14 @@ def timeout_seconds() -> int:
     return max(1, _env_int("AO_SQL_EXECUTE_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS))
 
 
+def require_allowed_caller(http_request: Request) -> None:
+    """403 unless the caller IP is in ``AO_SQL_EXECUTE_ALLOWED_IPS``."""
+    client_ip = http_request.client.host if http_request.client else ""
+    if client_ip not in allowed_ips():
+        logger.warning("Same-host API refused caller %s", client_ip or "<unknown>")
+        raise HTTPException(status_code=403, detail="Caller is not allowed.")
+
+
 def _resolve_connector(target_db: str) -> Any:
     from auto_ontology.connectors import get_connectors
     from auto_ontology.retrieval.text_to_sql.connector_routing import (
@@ -171,10 +179,7 @@ def execute_sql(
     """
     from auto_ontology.retrieval.text_to_sql.chat_sql import execute_chat_sql_limited
 
-    client_ip = http_request.client.host if http_request.client else ""
-    if client_ip not in allowed_ips():
-        logger.warning("SQL execute API refused caller %s", client_ip or "<unknown>")
-        raise HTTPException(status_code=403, detail="Caller is not allowed.")
+    require_allowed_caller(http_request)
 
     cap = max_rows_cap()
     max_rows = min(request.max_rows or cap, cap)
@@ -236,3 +241,113 @@ def execute_sql(
         over_limit=result.over_limit,
         execution_time_ms=elapsed_ms,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/catalog/fingerprint
+# ---------------------------------------------------------------------------
+
+
+class CatalogFingerprintResponse(BaseModel):
+    """What text-to-SQL currently depends on, as hashes a caller can key on."""
+
+    target_db: str
+    state: str = Field(
+        description=(
+            "ready | updating | initializing | failed. A caller should not cache "
+            "generated SQL while updating or initializing."
+        )
+    )
+    version: str = Field(description="Changes whenever generated SQL may change.")
+    structure_hash: str = Field(
+        description="target_db schema shape only (tables, columns, types, PKs)."
+    )
+    content_hash: str
+    config_hash: str
+    generation: int | None = Field(
+        default=None, description="Published ingest generation, when tracked."
+    )
+    build: str
+    validated_at: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+_FINGERPRINT_MEMO_SECONDS = 10.0
+_fingerprint_memo: dict[str, tuple[float, CatalogFingerprintResponse]] = {}
+_fingerprint_lock = threading.Lock()
+
+
+def _state_and_generation(target_db: str) -> tuple[str, int | None]:
+    """Ingest state for ``target_db``.
+
+    Without persisted ingest state the store is treated as ready with no
+    generation; the schema-watch module overrides this when present.
+    """
+    try:
+        from auto_ontology.ingestion_service.schema_state import current_state
+    except ImportError:
+        return "ready", None
+    return current_state(target_db)
+
+
+def _compute(target_db: str) -> CatalogFingerprintResponse:
+    from auto_ontology.dal.fingerprint import (
+        build_version,
+        compute_fingerprint,
+        fingerprint_version,
+    )
+
+    state, generation = _state_and_generation(target_db)
+    fp = compute_fingerprint(target_db)
+    build = build_version()
+    warnings = []
+    if build == "unknown":
+        warnings.append(
+            "AO_BUILD_VERSION is not set; code changes do not change version."
+        )
+    if fp["structure_rows"] == 0:
+        warnings.append(f"No catalog rows for {target_db!r}.")
+    return CatalogFingerprintResponse(
+        target_db=target_db,
+        state=state,
+        version=fingerprint_version(
+            build, fp["config_hash"], fp["content_hash"], generation
+        ),
+        structure_hash=fp["structure_hash"],
+        content_hash=fp["content_hash"],
+        config_hash=fp["config_hash"],
+        generation=generation,
+        build=build,
+        validated_at=fp["validated_at"],
+        warnings=warnings,
+    )
+
+
+@router.get(
+    "/catalog/fingerprint",
+    response_model=CatalogFingerprintResponse,
+    responses={403: {"description": "Caller IP is not allowed"}},
+)
+def catalog_fingerprint(
+    target_db: str, http_request: Request, fresh: bool = False
+) -> CatalogFingerprintResponse:
+    """Hashes of everything text-to-SQL reads, for a co-located cache to key on.
+
+    Same caller restriction as ``/api/sql/execute``. ``version`` changes when the
+    catalog, semantic layer, example SQL, glossary, prompts, agent settings,
+    model settings or build change. ``structure_hash`` changes only with
+    ``target_db``'s schema shape. Results are memoised for 10 seconds unless
+    ``fresh=true``. ``state`` is read live on every call.
+    """
+    require_allowed_caller(http_request)
+    now = time.monotonic()
+    with _fingerprint_lock:
+        memo = _fingerprint_memo.get(target_db)
+    if not fresh and memo and now - memo[0] < _FINGERPRINT_MEMO_SECONDS:
+        state, generation = _state_and_generation(target_db)
+        if state == memo[1].state and generation == memo[1].generation:
+            return memo[1]
+    result = _compute(target_db)
+    with _fingerprint_lock:
+        _fingerprint_memo[target_db] = (time.monotonic(), result)
+    return result

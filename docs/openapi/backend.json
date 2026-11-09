@@ -19,6 +19,77 @@
         "title": "Body_import_model_api_model_import_post",
         "type": "object"
       },
+      "CatalogFingerprintResponse": {
+        "description": "What text-to-SQL currently depends on, as hashes a caller can key on.",
+        "properties": {
+          "build": {
+            "title": "Build",
+            "type": "string"
+          },
+          "config_hash": {
+            "title": "Config Hash",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Published ingest generation, when tracked.",
+            "title": "Generation"
+          },
+          "state": {
+            "description": "ready | updating | initializing | failed. A caller should not cache generated SQL while updating or initializing.",
+            "title": "State",
+            "type": "string"
+          },
+          "structure_hash": {
+            "description": "target_db schema shape only (tables, columns, types, PKs).",
+            "title": "Structure Hash",
+            "type": "string"
+          },
+          "target_db": {
+            "title": "Target Db",
+            "type": "string"
+          },
+          "validated_at": {
+            "title": "Validated At",
+            "type": "string"
+          },
+          "version": {
+            "description": "Changes whenever generated SQL may change.",
+            "title": "Version",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "target_db",
+          "state",
+          "version",
+          "structure_hash",
+          "content_hash",
+          "config_hash",
+          "build",
+          "validated_at"
+        ],
+        "title": "CatalogFingerprintResponse",
+        "type": "object"
+      },
       "ChatCancelResponse": {
         "additionalProperties": true,
         "properties": {
@@ -6385,6 +6456,62 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/catalog/fingerprint": {
+      "get": {
+        "description": "Hashes of everything text-to-SQL reads, for a co-located cache to key on.\n\nSame caller restriction as ``/api/sql/execute``. ``version`` changes when the\ncatalog, semantic layer, example SQL, glossary, prompts, agent settings,\nmodel settings or build change. ``structure_hash`` changes only with\n``target_db``'s schema shape. Results are memoised for 10 seconds unless\n``fresh=true``. ``state`` is read live on every call.",
+        "operationId": "catalog_fingerprint_api_catalog_fingerprint_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "target_db",
+            "required": true,
+            "schema": {
+              "title": "Target Db",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Fresh",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogFingerprintResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Caller IP is not allowed"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Catalog Fingerprint",
+        "tags": [
+          "sql-execute"
+        ]
+      }
+    },
     "/api/chat/cancel": {
       "post": {
         "description": "Abort the in-flight run for ``conversation_id``, if any.\n\nBacks the chat UI's Stop button. Without this, stopping only detached\nthe browser while the agent kept running and holding the slot, so the\nvery next question in the same conversation was rejected with 409.\n\nKilling the worker makes ``PrewarmedWorker.events()`` return rather\nthan raise, so ``_pump`` appends no error event: the run's buffer ends\nwith whatever steps completed and the stream closes with ``[DONE]``.\nConsumers therefore see a run that stopped without an answer, and the\nconversation keeps its user turn with no assistant reply.",
