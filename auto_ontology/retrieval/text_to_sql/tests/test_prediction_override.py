@@ -151,8 +151,8 @@ def test_worker_submit_passes_prediction_through() -> None:
     worker.submit("q", prediction=True)
     worker.submit("q2")
 
-    assert sent[0][1] == ("q", True, None, None, [], None)
-    assert sent[1][1] == ("q2", None, None, None, [], None)
+    assert sent[0][1] == ("q", True, None, None, [], None, None)
+    assert sent[1][1] == ("q2", None, None, None, [], None, None)
 
 
 def test_worker_submit_accepts_every_field_by_keyword() -> None:
@@ -170,6 +170,7 @@ def test_worker_submit_accepts_every_field_by_keyword() -> None:
         target_db="analytics",
         subject_token="jwt",
         evidence="authoritative",
+        result_limits={"preview_rows": 100, "max_rows": 50000},
     )
 
     assert sent[0][1] == (
@@ -179,6 +180,7 @@ def test_worker_submit_accepts_every_field_by_keyword() -> None:
         "jwt",
         [],
         "authoritative",
+        {"preview_rows": 100, "max_rows": 50000},
     )
 
 
@@ -192,7 +194,16 @@ def test_worker_payload_unpacks_as_the_loop_expects() -> None:
 
     worker.submit("q", prediction=True, target_db="db", subject_token="tok")
 
-    question, prediction, target_db, subject_token, history, evidence = sent[0][1]
+    (
+        question,
+        prediction,
+        target_db,
+        subject_token,
+        history,
+        evidence,
+        result_limits,
+    ) = sent[0][1]
     assert (question, prediction, target_db, subject_token) == ("q", True, "db", "tok")
     assert history == []
     assert evidence is None
+    assert result_limits is None

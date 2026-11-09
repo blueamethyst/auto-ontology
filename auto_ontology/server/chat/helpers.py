@@ -63,6 +63,34 @@ class ChatRequest(BaseModel):
             "Catalog database UUID or database name used to scope retrieval and SQL."
         ),
     )
+    preview_rows: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Keep only this many result rows in the answer and count the rest "
+            "(``total_count``). Omitted: every row is returned."
+        ),
+    )
+    max_rows: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Stop reading the result after this many rows and report "
+            "``over_limit``. Omitted with ``preview_rows`` set: same as "
+            "``preview_rows``."
+        ),
+    )
+
+    def result_limits(self) -> dict[str, int] | None:
+        """Row limits for the pipeline, or ``None`` to return every row."""
+        if self.preview_rows is None and self.max_rows is None:
+            return None
+        limits: dict[str, int] = {}
+        if self.preview_rows is not None:
+            limits["preview_rows"] = self.preview_rows
+        if self.max_rows is not None:
+            limits["max_rows"] = self.max_rows
+        return limits
 
 
 # Message 2 (the chart, or the raw result table when there's nothing to plot)

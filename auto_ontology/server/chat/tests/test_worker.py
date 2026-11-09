@@ -33,6 +33,7 @@ def _run_loop(
     connector_batches: list[list[str]],
     *,
     evidence: str | None = None,
+    result_limits: dict[str, int] | None = None,
 ) -> dict:
     """Drive one ASK through ``_worker_loop`` and return the agent payload it built.
 
@@ -80,7 +81,9 @@ def _run_loop(
         "auto_ontology.retrieval.text_to_sql.main.stream_agent_response", fake_stream
     )
 
-    in_q = _FakeQueue([(worker_module._MSG_ASK, ("q", None, None, None, [], evidence))])
+    in_q = _FakeQueue(
+        [(worker_module._MSG_ASK, ("q", None, None, None, [], evidence, result_limits))]
+    )
     worker_module._worker_loop(in_q, _FakeQueue())
     return captured
 
@@ -122,3 +125,18 @@ def test_worker_forwards_evidence_without_changing_question(
     assert payload["question"] == "q"
     assert payload["processing_question"] == "q"
     assert payload["evidence"] == "status means accounts.status"
+
+
+def test_worker_forwards_result_limits(monkeypatch: MonkeyPatch) -> None:
+    limits = {"preview_rows": 100, "max_rows": 50000}
+    payload = _run_loop(
+        monkeypatch, connector_batches=[["boot-connector"]], result_limits=limits
+    )
+
+    assert payload["result_limits"] == limits
+
+
+def test_worker_omits_result_limits_by_default(monkeypatch: MonkeyPatch) -> None:
+    payload = _run_loop(monkeypatch, connector_batches=[["boot-connector"]])
+
+    assert "result_limits" not in payload

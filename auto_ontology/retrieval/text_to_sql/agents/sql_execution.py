@@ -17,7 +17,10 @@ from auto_ontology.retrieval.text_to_sql.base import BaseAgent, record_thought
 from auto_ontology.retrieval.text_to_sql.connector_routing import (
     resolve_connector_from_tables,
 )
-from auto_ontology.retrieval.text_to_sql.chat_sql import execute_chat_sql
+from auto_ontology.retrieval.text_to_sql.chat_sql import (
+    execute_chat_sql,
+    execute_chat_sql_limited,
+)
 from auto_ontology.retrieval.text_to_sql.numeric_types import (
     SQL_CORRECTION_ERROR,
     cast_jsonb_numeric_projections,
@@ -67,7 +70,15 @@ class QueryResponse:
         numeric_kinds: Optional[list] = None,
         values_digest: Optional[str] = None,
         sql_correction: Optional[str] = None,
+        total_count: Optional[int] = None,
+        over_limit: bool = False,
     ):
+        # Rows the statement returned. ``None`` when the caller set no row
+        # limits (then ``result`` already holds every row). With limits,
+        # ``result`` holds only the preview and this is the full count, capped
+        # at ``max_rows`` when ``over_limit`` is set.
+        self.total_count = total_count
+        self.over_limit = over_limit
         # Per output column ``"float"`` / ``"decimal"`` / ``None``; lets a caller
         # that needs a predictable numeric type know what this SQL returned.
         self.numeric_kinds = numeric_kinds or []
@@ -149,17 +160,39 @@ def _deduplicate_result_columns(df: Any) -> Any:
     return df
 
 
+def _result_limits(state: AgentState) -> tuple[int, int] | None:
+    """``(preview_rows, max_rows)`` the caller asked for, or ``None``.
+
+    Callers that send no limits keep the original behaviour: every row.
+    """
+    limits = state.get("result_limits") or {}
+    max_rows = limits.get("max_rows")
+    preview_rows = limits.get("preview_rows")
+    if max_rows is None and preview_rows is None:
+        return None
+    if max_rows is None:
+        max_rows = preview_rows
+    if preview_rows is None:
+        preview_rows = max_rows
+    return int(preview_rows), int(max_rows)
+
+
 def _run_sql(
     sql: str,
     connector: SQLDatabase | None,
     *,
     record_numeric_kinds: bool = False,
+    limits: tuple[int, int] | None = None,
 ) -> QueryResponse:
     """Execute SQL against the supplied ``connector``.
 
     Caller is responsible for picking the right connector for ``sql``
     (e.g. by matching ``relevant_tables[*].database_name`` against
     ``connector.database_name``).
+
+    With *limits* ``(preview_rows, max_rows)`` only the preview is kept and the
+    rest is counted (see :func:`execute_chat_sql_limited`). The SQL is not
+    rewritten.
     """
     if connector is None:
         return QueryResponse(
@@ -169,7 +202,20 @@ def _run_sql(
         original_sql = sql
         dialect = getattr(connector, "dialect", "")
         sql = _sanitize_sql_for_dialect(sql, dialect)
-        df = execute_chat_sql(connector, sql)
+        total_count: Optional[int] = None
+        over_limit = False
+        sliced = False
+        if limits is None:
+            df = execute_chat_sql(connector, sql)
+        else:
+            preview_rows, max_rows = limits
+            limited = execute_chat_sql_limited(
+                connector, sql, preview_rows=preview_rows, max_rows=max_rows
+            )
+            df = limited.frame
+            total_count = limited.total_count
+            over_limit = limited.over_limit
+            sliced = limited.sliced
         sql_correction = _sql_correction_for(
             original_sql, sql, dialect, df, record_numeric_kinds
         )
@@ -186,12 +232,14 @@ def _run_sql(
         return QueryResponse(result=None, sliced=False, error=str(e), statement=sql)
     return QueryResponse(
         result=[payload],
-        sliced=False,
+        sliced=sliced,
         error=None,
         statement=sql,
         numeric_kinds=numeric_kinds,
         values_digest=values_digest,
         sql_correction=sql_correction,
+        total_count=total_count,
+        over_limit=over_limit,
     )
 
 
@@ -239,8 +287,13 @@ class SQLExecutionAgent(BaseAgent):
         # coordinator); every other caller keeps the exact call and result shape
         # it had before.
         record_kinds = bool(state.get("numeric_type_alignment"))
+        limits = _result_limits(state)
         if record_kinds:
-            response_from_db = _run_sql(sql_code, connector, record_numeric_kinds=True)
+            response_from_db = _run_sql(
+                sql_code, connector, record_numeric_kinds=True, limits=limits
+            )
+        elif limits is not None:
+            response_from_db = _run_sql(sql_code, connector, limits=limits)
         else:
             response_from_db = _run_sql(sql_code, connector)
 
@@ -307,6 +360,12 @@ class SQLExecutionAgent(BaseAgent):
             **path_state,
             "sql_response_from_db": response_from_db.result,
         }
+        if response_from_db.total_count is not None:
+            # Only when the caller asked for row limits; the preview above then
+            # holds fewer rows than the statement returned.
+            updated_path_state["sql_result_total_count"] = response_from_db.total_count
+            updated_path_state["sql_result_over_limit"] = response_from_db.over_limit
+            updated_path_state["sql_result_sliced"] = response_from_db.sliced
         if record_kinds:
             # Numeric types of what just ran, tagged with that SQL so a reader
             # can tell when they are stale. A statement that differs from the

@@ -63,6 +63,10 @@ class TextToSQLPayload(TypedDict):
     acronyms: NotRequired[list[dict[str, str]]]
     custom_prompts: NotRequired[str]
     target_db: NotRequired[str]
+    # ``{"preview_rows": int, "max_rows": int}``. When set, SQL execution keeps
+    # only the first ``preview_rows`` rows, counts the rest, and stops reading
+    # past ``max_rows`` (reported as over the limit). Omitted: every row.
+    result_limits: NotRequired[dict[str, int]]
     # Prediction override: True forces prediction, False excludes prediction while
     # still classifying as information/calculation, and None/absent classifies freely.
     prediction: NotRequired[bool | None]
@@ -101,6 +105,8 @@ class AgentState(TypedDict):
     # Caller-supplied branch override; see TextToSQLPayload.prediction.
     prediction_override: NotRequired[bool | None]
     connectors: list[SQLDatabase]
+    # See TextToSQLPayload.result_limits.
+    result_limits: NotRequired[dict[str, int]]
     path_state: dict
     data_retriever: Retriever
     semantic_retriever: Retriever

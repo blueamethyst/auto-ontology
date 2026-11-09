@@ -659,6 +659,7 @@ async def chat_completions(
         subject_token=subject_token,
         conversation_history=conversation_history,
         evidence=request.evidence,
+        result_limits=request.result_limits(),
     )
     threading.Thread(target=_pump, args=(slot,), daemon=True).start()
     asyncio.create_task(_watch_disconnect(http_request, slot))

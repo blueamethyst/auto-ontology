@@ -141,6 +141,7 @@ def _worker_loop(
             subject_token,
             conversation_history,
             evidence,
+            result_limits,
         ) = payload
         try:
             # Connections are resolved once at worker init. If that
@@ -196,6 +197,8 @@ def _worker_loop(
             }
             if target_db:
                 agent_payload["target_db"] = target_db
+            if result_limits:
+                agent_payload["result_limits"] = result_limits
             for event in stream_agent_response(agent_payload):
                 out_q.put((_TAG_EVENT, event))
         except BaseException as exc:  # noqa: BLE001 — surface to parent
@@ -246,6 +249,7 @@ class PrewarmedWorker:
         subject_token: str | None = None,
         conversation_history: list[dict[str, str | None]] | None = None,
         evidence: str | None = None,
+        result_limits: dict[str, int] | None = None,
     ) -> None:
         """Ask *question*, optionally forcing the prediction/SQL branch.
 
@@ -257,6 +261,8 @@ class PrewarmedWorker:
         ones, so SQL executes under that user's own Databricks grants.
         *evidence* is optional authoritative evidence kept separate from
         the question.
+        *result_limits* (``preview_rows``/``max_rows``) keeps only a preview of
+        the result rows and counts the rest; ``None`` returns every row.
         """
         self._in_q.put(
             (
@@ -268,6 +274,7 @@ class PrewarmedWorker:
                     subject_token,
                     conversation_history or [],
                     evidence,
+                    result_limits,
                 ),
             )
         )

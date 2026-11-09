@@ -14,6 +14,7 @@ import uvicorn
 from auto_ontology.env import load_env
 
 import logging
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +48,7 @@ from auto_ontology.server.model_interchange.router import (  # noqa: E402
     router as model_interchange_router,
 )
 from auto_ontology.server.search.router import router as search_router  # noqa: E402
+from auto_ontology.server.sql_execute.router import router as sql_execute_router  # noqa: E402
 
 
 @asynccontextmanager
@@ -112,6 +114,7 @@ def create_app() -> FastAPI:
         model_interchange_router, prefix="/api", tags=["model-interchange"]
     )
     app.include_router(search_router, prefix="/api", tags=["search"])
+    app.include_router(sql_execute_router, prefix="/api", tags=["sql-execute"])
 
     return app
 
@@ -123,7 +126,10 @@ def main() -> None:
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        # AO_SERVER_HOST=127.0.0.1 keeps the API (including /api/sql/execute)
+        # on the local host. The container default stays 0.0.0.0; publish it as
+        # ``-p 127.0.0.1:3001:3001`` instead.
+        host=os.environ.get("AO_SERVER_HOST", "0.0.0.0"),
         port=3001,
         log_config=None,
     )

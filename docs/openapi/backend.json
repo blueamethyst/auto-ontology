@@ -61,6 +61,19 @@
             "description": "Optional authoritative evidence supplied separately from the question.",
             "title": "Evidence"
           },
+          "max_rows": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stop reading the result after this many rows and report ``over_limit``. Omitted with ``preview_rows`` set: same as ``preview_rows``.",
+            "title": "Max Rows"
+          },
           "prediction": {
             "anyOf": [
               {
@@ -71,6 +84,19 @@
               }
             ],
             "title": "Prediction"
+          },
+          "preview_rows": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Keep only this many result rows in the answer and count the rest (``total_count``). Omitted: every row is returned.",
+            "title": "Preview Rows"
           },
           "question": {
             "minLength": 1,
@@ -4204,6 +4230,78 @@
           "expression"
         ],
         "title": "SqlAttributeValidate",
+        "type": "object"
+      },
+      "SqlExecuteRequest": {
+        "description": "One statement to run against one connected database.",
+        "properties": {
+          "max_rows": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Row cap for this call; never above the server cap.",
+            "title": "Max Rows"
+          },
+          "sql": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Sql",
+            "type": "string"
+          },
+          "target_db": {
+            "description": "Connected database name (as in the catalog).",
+            "minLength": 1,
+            "title": "Target Db",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql",
+          "target_db"
+        ],
+        "title": "SqlExecuteRequest",
+        "type": "object"
+      },
+      "SqlExecuteResponse": {
+        "description": "Every row of the result.",
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "execution_time_ms": {
+            "title": "Execution Time Ms",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "rows",
+          "total_count",
+          "execution_time_ms"
+        ],
+        "title": "SqlExecuteResponse",
         "type": "object"
       },
       "SqlExplorationColumn": {
@@ -9143,6 +9241,50 @@
         "summary": "Get Sql Attribute Description Suggestion",
         "tags": [
           "sql-attributes"
+        ]
+      }
+    },
+    "/api/sql/execute": {
+      "post": {
+        "description": "Run one checked SELECT on a connected database and return every row.\n\nFor a co-located service that needs the full result of a query it already\npreviewed through chat (for example an Excel download). Only callers in\n``AO_SQL_EXECUTE_ALLOWED_IPS`` (default loopback) are served. The statement\nmust be a single SELECT that reads only catalog tables of ``target_db``.\nA result larger than the row cap (``AO_SQL_EXECUTE_MAX_ROWS``, default\n50,000, or ``max_rows`` when lower) is rejected with 413.",
+        "operationId": "execute_sql_api_sql_execute_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SqlExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SqlExecuteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Caller IP is not allowed"
+          },
+          "404": {
+            "description": "Target database is not connected"
+          },
+          "413": {
+            "description": "Result has more rows than the cap"
+          },
+          "422": {
+            "description": "Statement failed the read-only / catalog checks"
+          }
+        },
+        "summary": "Execute Sql",
+        "tags": [
+          "sql-execute"
         ]
       }
     },

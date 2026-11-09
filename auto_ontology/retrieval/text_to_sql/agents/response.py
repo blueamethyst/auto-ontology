@@ -81,6 +81,12 @@ class ResponseAgent(BaseAgent):
             "custom_analyses_used": [],
             "sql_response_from_db": sql_response_from_db,
         }
+        # Present only when the caller asked for row limits: the rows above are
+        # a preview and these describe the full result.
+        if path_state.get("sql_result_total_count") is not None:
+            response["total_count"] = path_state["sql_result_total_count"]
+            response["over_limit"] = bool(path_state.get("sql_result_over_limit"))
+            response["sliced"] = bool(path_state.get("sql_result_sliced"))
 
         self.logger.info("Calculation response prepared and returned")
 

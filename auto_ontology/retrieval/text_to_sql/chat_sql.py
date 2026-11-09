@@ -21,6 +21,7 @@ from typing import Any
 
 import pandas as pd
 
+from auto_ontology.connectors.limited_result import LimitedResult, limit_frame
 from auto_ontology.infra.feature_flags import get_sql_query_timeout_seconds
 
 logger = logging.getLogger(__name__)
@@ -84,3 +85,42 @@ def execute_chat_sql(
     if timeout_s is None:
         timeout_s = get_sql_query_timeout_seconds()
     return connector.execute(sql, timeout_s=timeout_s)
+
+
+def execute_chat_sql_limited(
+    connector: Any,
+    sql: str,
+    *,
+    preview_rows: int,
+    max_rows: int,
+    kind: str = "chat SQL",
+    timeout_s: float | None = None,
+) -> LimitedResult:
+    """Like :func:`execute_chat_sql`, but keep only a preview and count the rest.
+
+    Connectors that implement ``execute_limited`` (MSSQL) read the result in
+    batches and stop at ``max_rows + 1`` rows. Others run the statement as
+    usual and the limits are applied to the fetched frame, so the caller sees
+    the same shape either way. The SQL is never rewritten.
+    """
+    log_chat_sql(connector, sql, kind=kind)
+
+    supports_timeout = getattr(connector, "supports_statement_timeout", False)
+    if supports_timeout and timeout_s is None:
+        timeout_s = get_sql_query_timeout_seconds()
+
+    execute_limited = getattr(connector, "execute_limited", None)
+    if callable(execute_limited):
+        return execute_limited(
+            sql,
+            preview_rows=preview_rows,
+            max_rows=max_rows,
+            timeout_s=timeout_s if supports_timeout else None,
+        )
+
+    df = (
+        connector.execute(sql, timeout_s=timeout_s)
+        if supports_timeout
+        else connector.execute(sql)
+    )
+    return limit_frame(df, preview_rows=preview_rows, max_rows=max_rows)

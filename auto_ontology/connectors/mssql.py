@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pandas as pd
 
+from auto_ontology.connectors.limited_result import LimitedResult, collect_limited
+
 try:
     import pymssql
 except ImportError:
@@ -23,6 +25,9 @@ if TYPE_CHECKING:
     from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Rows fetched per round trip when reading a result incrementally.
+_FETCH_BATCH_ROWS = 1000
 
 
 def _column_names(description: Any) -> list[str]:
@@ -90,7 +95,8 @@ class MSSQLDatabase:
     """Concrete SQLDatabase backed by ``pymssql``.
 
     This connector supports Microsoft SQL Server 2008 and later versions.
-    Statement timeout is supported via SET LOCK_TIMEOUT.
+    ``timeout_s`` caps both lock waits (``SET LOCK_TIMEOUT``) and query run
+    time (the pymssql connection's ``query_timeout``).
 
     Attributes:
         supports_statement_timeout: Whether execute() supports timeout_s parameter
@@ -155,6 +161,36 @@ class MSSQLDatabase:
             )
         return self._conn
 
+    def _apply_timeout(
+        self, conn: Any, cursor: Any, timeout_s: Optional[float]
+    ) -> None:
+        """Cap lock waits and query run time for the next statement.
+
+        ``SET LOCK_TIMEOUT`` alone only bounds waiting for locks; a long scan
+        would run unbounded. ``query_timeout`` on the underlying ``_mssql``
+        connection bounds the statement itself. The connection is cached, so
+        the value is set on every call (``None`` clears it to 0 = no limit).
+        """
+        if timeout_s is not None:
+            cursor.execute(f"SET LOCK_TIMEOUT {int(timeout_s * 1000)}")
+        raw = getattr(conn, "_conn", None)
+        if raw is not None and hasattr(raw, "query_timeout"):
+            try:
+                raw.query_timeout = max(1, int(timeout_s)) if timeout_s else 0
+            except Exception as exc:  # noqa: BLE001 — never fail a query over the cap
+                logger.warning("Could not set MSSQL query_timeout: %s", exc)
+
+    @staticmethod
+    def _cancel_pending(conn: Any) -> None:
+        """Ask the server to stop sending rows we no longer read."""
+        raw = getattr(conn, "_conn", None)
+        if raw is None or not hasattr(raw, "cancel"):
+            return
+        try:
+            raw.cancel()
+        except Exception as exc:  # noqa: BLE001 — best effort
+            logger.warning("MSSQL cancel after row limit failed: %s", exc)
+
     @property
     def dialect(self) -> str:
         """Return sqlglot dialect name for T-SQL."""
@@ -191,9 +227,7 @@ class MSSQLDatabase:
         cursor = conn.cursor(as_dict=False)
 
         try:
-            # Set statement timeout if specified
-            if timeout_s is not None:
-                cursor.execute(f"SET LOCK_TIMEOUT {timeout_s * 1000}")
+            self._apply_timeout(conn, cursor, timeout_s)
 
             if parameters:
                 cursor.execute(sql, tuple(parameters))
@@ -213,6 +247,54 @@ class MSSQLDatabase:
             logger.error(f"MSSQL execute error: {e}")
             raise
         finally:
+            cursor.close()
+
+    def execute_limited(
+        self,
+        sql: str,
+        *,
+        preview_rows: int,
+        max_rows: int,
+        timeout_s: Optional[float] = None,
+    ) -> LimitedResult:
+        """Run *sql*, keep the first *preview_rows* rows and count the rest.
+
+        Rows are read with ``fetchmany`` so at most one batch plus the preview
+        is in memory. Reading stops at ``max_rows + 1`` rows; the rest of the
+        result is cancelled on the server. The SQL is not rewritten.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor(as_dict=False)
+        stopped_early = False
+        try:
+            self._apply_timeout(conn, cursor, timeout_s)
+            cursor.execute(sql)
+            if not cursor.description:
+                conn.commit()
+                return LimitedResult(
+                    frame=pd.DataFrame(), total_count=0, over_limit=False
+                )
+
+            columns = _column_names(cursor.description)
+
+            def batches() -> Any:
+                while True:
+                    rows = cursor.fetchmany(_FETCH_BATCH_ROWS)
+                    if not rows:
+                        return
+                    yield rows
+
+            result = collect_limited(
+                batches(), columns, preview_rows=preview_rows, max_rows=max_rows
+            )
+            stopped_early = result.over_limit
+            return result
+        except Exception as e:
+            logger.error(f"MSSQL execute error: {e}")
+            raise
+        finally:
+            if stopped_early:
+                self._cancel_pending(conn)
             cursor.close()
 
     def get_tables(self) -> pd.DataFrame:
@@ -423,7 +505,9 @@ class MSSQLDatabase:
         """
         return self.execute(sql)
 
-    def sample_data(self, table: str, schema: str = "dbo", limit: int = 100) -> pd.DataFrame:
+    def sample_data(
+        self, table: str, schema: str = "dbo", limit: int = 100
+    ) -> pd.DataFrame:
         """Get sample rows from a table.
 
         Args:
