@@ -228,8 +228,10 @@ def _build_client(
     if model.startswith(("openai/", "azure/", "aws/")):
         from langchain_openai import ChatOpenAI
 
+        # Strip the provider prefix (openai/, azure/, aws/) for the actual API call
+        actual_model = model.split("/", 1)[1] if "/" in model else model
         return ChatOpenAI(
-            model=model,
+            model=actual_model,
             api_key=api_key,
             base_url=base_url,
             # temperature omitted: gpt-5.x/o-series reject any explicit value and

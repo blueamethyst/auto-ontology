@@ -340,6 +340,7 @@ class InformationAgent(BaseAgent):
 
             seen_calls.add(signature)
             tool_call_count += 1
+            self.logger.info(f"Tool call #{tool_call_count}: {action.tool.value} args={arguments}")
             try:
                 result = run_information_tool(
                     action.tool,
@@ -355,6 +356,7 @@ class InformationAgent(BaseAgent):
                         "message": f"{type(exc).__name__}: {exc}",
                     },
                 }
+            self.logger.info(f"Tool call #{tool_call_count} result ok={result.get('ok')}, error={result.get('error')}")
             observations.append(
                 {
                     "tool": action.tool.value,

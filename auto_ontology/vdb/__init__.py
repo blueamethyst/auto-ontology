@@ -4,8 +4,13 @@
 
 """VDB initialization — data layer and semantic layer collections."""
 
+import os
+
 from auto_ontology.infra.postgres import get_postgres_connection_string
 from auto_ontology.vdb.postgres import PostgresVDB
+
+# Default to 1536 for OpenAI, 2048 for NVIDIA NIM
+DEFAULT_VECTOR_SIZE = int(os.environ.get("AUTO_ONTOLOGY_VECTOR_SIZE", "1536"))
 
 DATA_VDB_COLLECTION: str = "data_objects_layer"
 SEMANTIC_VDB_COLLECTION: str = "semantic_layer"
@@ -27,6 +32,7 @@ def get_vdb(
         "connection_string": connection_string,
         "collection_name": collection_name,
         "schema_name": VDB_SCHEMA,
+        "vector_size": DEFAULT_VECTOR_SIZE,
     }
     if database_name:
         kwargs["database_name"] = database_name

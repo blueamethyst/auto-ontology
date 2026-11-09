@@ -122,26 +122,40 @@ def _match_record(
     ]
 
 
+def _is_uuid(value: str | None) -> bool:
+    """Check if a string looks like a valid UUID."""
+    if not value:
+        return False
+    try:
+        UUID(value)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def _resolve_table(
     *,
     table_id: str | None = None,
     table_name: str | None = None,
     database_name: str | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    if table_id:
+    # Only use table_id if it's a valid UUID
+    if table_id and _is_uuid(table_id):
         table = fetch_table_by_id(table_id)
         if not table:
             return None, _error("not_found", f"Table id {table_id!r} was not found.")
         return table_id, None
-    if not table_name:
+    # Fall back to table_name lookup (including table_id if it's not a UUID)
+    name_to_find = table_name or table_id
+    if not name_to_find:
         return None, _error("invalid_arguments", "Provide table_id or table_name.")
-    resolved = find_table_id_by_name(table_name, database_name=database_name)
+    resolved = find_table_id_by_name(name_to_find, database_name=database_name)
     if resolved:
         return resolved, None
     scope = f" in dataset {database_name!r}" if database_name else ""
     return None, _error(
         "not_found_or_ambiguous",
-        f"Table {table_name!r}{scope} was not found or is ambiguous.",
+        f"Table {name_to_find!r}{scope} was not found or is ambiguous.",
     )
 
 
@@ -166,16 +180,25 @@ def list_schemas(
     **_: Any,
 ) -> dict[str, Any]:
     """Return schemas directly beneath one database."""
-    resolved_id = database_id or dataset_id
-    if not resolved_id and database_name:
-        # Look up database by name when ID is not provided
-        databases = fetch_databases()
-        matches = [
-            db for db in databases
-            if db.get("name", "").lower() == database_name.lower()
-        ]
-        if matches:
-            resolved_id = matches[0]["id"]
+    # Only use database_id/dataset_id if they look like valid UUIDs
+    resolved_id = None
+    if _is_uuid(database_id):
+        resolved_id = database_id
+    elif _is_uuid(dataset_id):
+        resolved_id = dataset_id
+
+    # If no valid UUID ID, try to look up by name
+    if not resolved_id:
+        # Use explicit database_name, or fall back to database_id/dataset_id as a name
+        name_to_find = database_name or database_id or dataset_id
+        if name_to_find:
+            databases = fetch_databases()
+            matches = [
+                db for db in databases
+                if db.get("name", "").lower() == name_to_find.lower()
+            ]
+            if matches:
+                resolved_id = matches[0]["id"]
     if not resolved_id:
         return _error("invalid_arguments", "Provide database_id or database_name.")
     result = fetch_schemas_for_database(resolved_id)
@@ -199,13 +222,38 @@ def list_schemas(
 def list_tables(
     *,
     schema_id: str | None = None,
+    schema_name: str | None = None,
     database_name: str | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Return tables directly beneath one schema."""
-    if not schema_id:
-        return _error("invalid_arguments", "Provide schema_id.")
-    tables = fetch_tables_for_schema(schema_id, database_name=database_name)
+    resolved_id = schema_id if _is_uuid(schema_id) else None
+
+    # If no valid UUID, try to look up by schema name
+    if not resolved_id and (schema_name or schema_id):
+        name_to_find = schema_name or schema_id
+        # Need database context to find the schema
+        if database_name:
+            databases = fetch_databases()
+            db_matches = [
+                db for db in databases
+                if db.get("name", "").lower() == database_name.lower()
+            ]
+            if db_matches:
+                db_id = db_matches[0]["id"]
+                schemas_result = fetch_schemas_for_database(db_id)
+                if schemas_result:
+                    schemas = schemas_result.get("schemas") or []
+                    schema_matches = [
+                        s for s in schemas
+                        if s.get("schema_name", "").lower() == name_to_find.lower()
+                    ]
+                    if schema_matches:
+                        resolved_id = schema_matches[0]["id"]
+
+    if not resolved_id:
+        return _error("invalid_arguments", "Provide schema_id (UUID) or schema_name with database_name.")
+    tables = fetch_tables_for_schema(resolved_id, database_name=database_name)
     return _ok(
         {
             "schema_id": schema_id,

@@ -352,14 +352,20 @@ def create_question_intent_prompt(
 ## Question types
 - information: asks about catalog or semantic metadata, including what a dataset,
   table, or column means, contains, or connects to, and how an existing measure is
-  defined or calculated. "How is revenue calculated/defined?" is information because
-  it asks for the stored definition rather than requesting a result.
+  defined or calculated. This includes questions about table structure, column lists,
+  data types, schema details, or table relationships. Examples:
+  * "How is revenue calculated/defined?" - asks for stored definition
+  * "Show me the structure of the orders table" - asks for table metadata
+  * "What columns does the users table have?" - asks for column list
+  * "List all tables in this database" - asks for catalog metadata
+  * "What is the data type of column X?" - asks for column metadata
 - prediction: asks to predict, forecast, estimate, project, or assess the likelihood
   of a future or currently unknown outcome. A query about existing historical rows
   is not prediction merely because it contains a date.
 - calculation: asks the data system to match/filter, rank, compare, count, aggregate,
   compute, or interpret values. "Calculate revenue for 2026" is calculation because
   it requests a derived value. If the type is uncertain, choose calculation.
+  NOTE: Questions asking about table structure, columns, or schema are NOT calculation.
 """
     )
 
