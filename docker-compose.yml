@@ -44,10 +44,17 @@ services:
     container_name: auto-ontology
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      # Host side bound to loopback by default: /api/sql/execute must only be
+      # reachable from this machine (DABI). The frontend uses the in-network
+      # address (PYTHON_API_URL), so it is unaffected. Set AO_BACKEND_BIND=0.0.0.0
+      # to expose the API on the network again.
+      - "${AO_BACKEND_BIND:-127.0.0.1}:3001:3001"
     env_file:
       - .env
     environment:
+      # Host requests arrive through Docker's gateway, not 127.0.0.1; list that
+      # gateway address in .env (AO_SQL_EXECUTE_ALLOWED_IPS) for DABI on the host.
+      AO_SQL_EXECUTE_ALLOWED_IPS: ${AO_SQL_EXECUTE_ALLOWED_IPS:-127.0.0.1,::1}
       POSTGRES_HOST: postgres
       # In-network port; POSTGRES_PORT in .env is the host-side mapping.
       POSTGRES_PORT: "5432"
