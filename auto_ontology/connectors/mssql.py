@@ -25,6 +25,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _column_names(description: Any) -> list[str]:
+    """Build unique DataFrame column names from a DB-API cursor description.
+
+    SQL Server leaves unaliased expressions (e.g. ``SUM(amt)``) unnamed, so
+    those get positional names; repeated names get a numeric suffix.
+    """
+    names: list[str] = []
+    seen: dict[str, int] = {}
+    for idx, col in enumerate(description, start=1):
+        name = col[0] or f"column_{idx}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+        names.append(name)
+    return names
+
+
 def _parse_connection_string(conn_str: str) -> dict[str, Any]:
     """Parse MSSQL connection string.
 
@@ -167,7 +186,9 @@ class MSSQLDatabase:
             pymssql.Error: On database errors
         """
         conn = self._get_connection()
-        cursor = conn.cursor(as_dict=True)
+        # Tuple rows, not as_dict: pymssql's dict cursor raises
+        # ColumnsWithoutNamesError on unaliased expressions like SUM(x).
+        cursor = conn.cursor(as_dict=False)
 
         try:
             # Set statement timeout if specified
@@ -181,8 +202,9 @@ class MSSQLDatabase:
 
             # Fetch results if query returns data
             if cursor.description:
+                columns = _column_names(cursor.description)
                 rows = cursor.fetchall()
-                return pd.DataFrame(rows)
+                return pd.DataFrame.from_records(rows, columns=columns)
 
             conn.commit()
             return pd.DataFrame()
