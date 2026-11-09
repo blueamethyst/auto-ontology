@@ -9,6 +9,7 @@ Date: 2026-11-04
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -28,6 +29,31 @@ logger = logging.getLogger(__name__)
 
 # Rows fetched per round trip when reading a result incrementally.
 _FETCH_BATCH_ROWS = 1000
+
+
+class MSSQLQueryTimeoutError(RuntimeError):
+    """The statement ran past ``timeout_s`` and was cancelled.
+
+    pymssql reports a ``query_timeout`` expiry as "TDS server connection timed
+    out", which reads as a connectivity failure. Callers that classify errors
+    (``is_infrastructure_error``) would then give up instead of rewriting a slow
+    query, so the timeout is re-raised with a message that says what happened.
+    """
+
+
+def _as_query_timeout(
+    exc: Exception, timeout_s: Optional[float], elapsed: float
+) -> Exception:
+    """Map a pymssql timeout during a capped statement to MSSQLQueryTimeoutError."""
+    if not timeout_s or elapsed < float(timeout_s) - 1:
+        return exc
+    if "timed out" not in str(exc).lower():
+        return exc
+    return MSSQLQueryTimeoutError(
+        f"The query was cancelled after exceeding the {int(timeout_s)}s execution "
+        "limit. The SQL is valid but too slow; rewrite it to read fewer rows "
+        "(narrow the period, filter earlier, aggregate in a summary table)."
+    )
 
 
 def _column_names(description: Any) -> list[str]:
@@ -244,9 +270,11 @@ class MSSQLDatabase:
         # Tuple rows, not as_dict: pymssql's dict cursor raises
         # ColumnsWithoutNamesError on unaliased expressions like SUM(x).
         cursor = conn.cursor(as_dict=False)
+        started = time.monotonic()
 
         try:
             self._apply_timeout(conn, cursor, timeout_s)
+            started = time.monotonic()
 
             if parameters:
                 cursor.execute(sql, tuple(parameters))
@@ -265,6 +293,9 @@ class MSSQLDatabase:
         except Exception as e:
             logger.error(f"MSSQL execute error: {e}")
             self._discard_if_dead(conn)
+            mapped = _as_query_timeout(e, timeout_s, time.monotonic() - started)
+            if mapped is not e:
+                raise mapped from e
             raise
         finally:
             cursor.close()
@@ -285,9 +316,11 @@ class MSSQLDatabase:
         """
         conn = self._get_connection()
         cursor = conn.cursor(as_dict=False)
+        started = time.monotonic()
         stopped_early = False
         try:
             self._apply_timeout(conn, cursor, timeout_s)
+            started = time.monotonic()
             cursor.execute(sql)
             if not cursor.description:
                 conn.commit()
@@ -312,6 +345,9 @@ class MSSQLDatabase:
         except Exception as e:
             logger.error(f"MSSQL execute error: {e}")
             self._discard_if_dead(conn)
+            mapped = _as_query_timeout(e, timeout_s, time.monotonic() - started)
+            if mapped is not e:
+                raise mapped from e
             raise
         finally:
             if stopped_early:

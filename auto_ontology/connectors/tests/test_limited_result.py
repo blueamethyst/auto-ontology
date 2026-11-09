@@ -209,3 +209,55 @@ class TestMssqlDeadConnection:
         with pytest.raises(RuntimeError):
             db.execute("SELECT broken")
         assert db._conn is conn
+
+
+class TestMssqlQueryTimeout:
+    def _timing_out(
+        self, monkeypatch: pytest.MonkeyPatch, elapsed: float
+    ) -> mssql.MSSQLDatabase:
+        db, conn = _db(1)
+        conn._conn.connected = True  # type: ignore[attr-defined]
+        clock = iter([100.0, 100.0, 100.0 + elapsed, 100.0 + elapsed])
+        monkeypatch.setattr(
+            mssql.time, "monotonic", lambda: next(clock, 100.0 + elapsed)
+        )
+
+        def boom(sql: str, *args: Any) -> None:
+            if not sql.startswith("SET "):
+                raise RuntimeError(
+                    "(20047, b'DB-Lib error message 20003, severity 6:\nTDS server connection timed out')"
+                )
+
+        original = conn.cursor
+
+        def cursor(as_dict: bool = False) -> _FakeCursor:
+            c = original(as_dict)
+            c.execute = boom  # type: ignore[method-assign]
+            return c
+
+        conn.cursor = cursor  # type: ignore[method-assign]
+        return db
+
+    def test_timeout_after_cap_is_reported_as_query_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from auto_ontology.connectors.db_errors import is_infrastructure_error
+
+        db = self._timing_out(monkeypatch, elapsed=30.2)
+        with pytest.raises(mssql.MSSQLQueryTimeoutError) as exc:
+            db.execute("SELECT 1", timeout_s=30)
+        assert "30s" in str(exc.value)
+        assert not is_infrastructure_error(exc.value, "SELECT 1")
+
+    def test_limited_path_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = self._timing_out(monkeypatch, elapsed=30.5)
+        with pytest.raises(mssql.MSSQLQueryTimeoutError):
+            db.execute_limited("SELECT 1", preview_rows=1, max_rows=1, timeout_s=30)
+
+    def test_early_timeout_stays_a_connectivity_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = self._timing_out(monkeypatch, elapsed=2.0)
+        with pytest.raises(RuntimeError) as exc:
+            db.execute("SELECT 1", timeout_s=30)
+        assert not isinstance(exc.value, mssql.MSSQLQueryTimeoutError)
