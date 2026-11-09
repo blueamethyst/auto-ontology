@@ -1116,6 +1116,128 @@ semantic_compilation_history = Table(
 
 
 # ---------------------------------------------------------------------------
+# Schema ingest state (source schema changes followed automatically)
+# ---------------------------------------------------------------------------
+#
+# Every write to the catalog, its embeddings or the semantic layer that comes
+# from ingesting a source database goes through one handler
+# (``ingestion_service/processor.py``) under one Postgres advisory lock. These
+# tables persist what that handler did, so a restart, a partial failure or a
+# second process sees the same state:
+#
+# * ``schema_ingest_run`` -- one row per handler run, with a heartbeat so a run
+#   whose process died can be closed by whoever takes the lock next;
+# * ``schema_open_failure`` -- stages that failed and have not been redone yet.
+#   A later run that redoes the stage successfully deletes the row. A run never
+#   counts as fully succeeded while one is open;
+# * ``schema_snapshot`` -- per database: the last applied source signature, a
+#   pending one being confirmed, the published generation and the account and
+#   permission signal used by delete judgement;
+# * ``schema_change_log`` -- what each run added, removed or changed, and what
+#   happened to the semantic objects attached to it. A record, not a backup.
+
+schema_ingest_run = Table(
+    "schema_ingest_run",
+    METADATA,
+    _id(),
+    Column("database_name", Text, nullable=False),
+    Column("trigger", Text, nullable=False),
+    Column("owner", Text, nullable=False),
+    Column("stage", Text, nullable=True),
+    Column(
+        "started_at", DateTime(timezone=True), nullable=False, server_default=func.now()
+    ),
+    Column(
+        "heartbeat_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("result", Text, nullable=True),
+    Column("verification", JSONB, nullable=True),
+    Column("error", Text, nullable=True),
+    CheckConstraint(
+        "result IS NULL OR result IN ('succeeded', 'failed', 'partial', 'skipped')",
+        name="result_value",
+    ),
+)
+Index(
+    "ix_schema_ingest_run_db_started",
+    schema_ingest_run.c.database_name,
+    schema_ingest_run.c.started_at,
+)
+
+schema_open_failure = Table(
+    "schema_open_failure",
+    METADATA,
+    _id(),
+    Column("database_name", Text, nullable=False),
+    Column("stage", Text, nullable=False),
+    Column("target", Text, nullable=False, server_default=""),
+    Column("first_run_id", Text, nullable=True),
+    Column("last_run_id", Text, nullable=True),
+    Column("attempts", Integer, nullable=False, server_default="1"),
+    Column(
+        "first_failed_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column(
+        "last_failed_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column("error", Text, nullable=True),
+    UniqueConstraint(
+        "database_name", "stage", "target", name="uq_schema_open_failure_key"
+    ),
+)
+
+schema_snapshot = Table(
+    "schema_snapshot",
+    METADATA,
+    Column("database_name", Text, primary_key=True),
+    Column("applied_signature", Text, nullable=True),
+    Column("applied_rows", JSONB, nullable=True),
+    Column("pending_signature", Text, nullable=True),
+    Column("pending_since", DateTime(timezone=True), nullable=True),
+    Column("pending_reason", Text, nullable=True),
+    Column("last_success_run_id", Text, nullable=True),
+    Column("last_change_ingest_at", DateTime(timezone=True), nullable=True),
+    Column("last_force_date", Text, nullable=True),
+    Column("last_checked_at", DateTime(timezone=True), nullable=True),
+    Column("generation", Integer, nullable=False, server_default="0"),
+    Column("auth_signal", JSONB, nullable=True),
+    Column("pending_auth_signal", JSONB, nullable=True),
+    Column(
+        "updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()
+    ),
+)
+
+schema_change_log = Table(
+    "schema_change_log",
+    METADATA,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("run_id", Text, nullable=False),
+    Column("database_name", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("object", Text, nullable=False),
+    Column("detail", JSONB, nullable=True),
+    Column(
+        "created_at", DateTime(timezone=True), nullable=False, server_default=func.now()
+    ),
+)
+Index(
+    "ix_schema_change_log_db_created",
+    schema_change_log.c.database_name,
+    schema_change_log.c.created_at,
+)
+
+
+# ---------------------------------------------------------------------------
 # User groups
 # ---------------------------------------------------------------------------
 #

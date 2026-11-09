@@ -278,16 +278,16 @@ _fingerprint_lock = threading.Lock()
 
 
 def _state_and_generation(target_db: str) -> tuple[str, int | None]:
-    """Ingest state for ``target_db``.
+    """Ingest state for ``target_db`` from the persisted handler state (plan 10.1)."""
+    from auto_ontology.dal.schema_state import current_state
 
-    Without persisted ingest state the store is treated as ready with no
-    generation; the schema-watch module overrides this when present.
-    """
     try:
-        from auto_ontology.ingestion_service.schema_state import current_state
-    except ImportError:
+        return current_state(target_db)
+    except Exception:  # noqa: BLE001 - state tables missing (not migrated yet)
+        logger.warning(
+            "schema ingest state unavailable; reporting ready", exc_info=True
+        )
         return "ready", None
-    return current_state(target_db)
 
 
 def _compute(target_db: str) -> CatalogFingerprintResponse:

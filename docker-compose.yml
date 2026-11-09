@@ -41,6 +41,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Shown by /api/catalog/fingerprint (build). Set it when building:
+        #   AO_BUILD_VERSION=$(git rev-parse --short HEAD) docker compose build
+        AO_BUILD_VERSION: ${AO_BUILD_VERSION:-unknown}
     image: auto-ontology:latest
     container_name: auto-ontology
     restart: unless-stopped
@@ -76,6 +80,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        AO_BUILD_VERSION: ${AO_BUILD_VERSION:-unknown}
     image: auto-ontology:latest
     container_name: auto-ontology-ingestion-service
     restart: unless-stopped
@@ -117,6 +123,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        AO_BUILD_VERSION: ${AO_BUILD_VERSION:-unknown}
     image: auto-ontology:latest
     container_name: auto-ontology-migrate
     env_file:

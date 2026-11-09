@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Callable
 
 from auto_ontology.semantic.bridge_tables import build_bridge_tables_sql_attributes
 from auto_ontology.semantic.cancellation import is_cancelled
@@ -34,19 +35,31 @@ def run_semantic_compilation(
     database_name: str,
     *,
     domain_summary: DomainSummary | None = None,
+    failures: list[dict] | None = None,
+    table_ids: list[str] | None = None,
+    protect: Callable[[dict], bool] | None = None,
 ) -> int:
     """Compile semantic taxonomy, embed all nodes into the VDB, then resolve FK edges.
 
     Returns the number of tables processed.
     """
     with limit_inflight(SEMANTIC_LLM_MAX_INFLIGHT):
-        return _run_semantic_compilation(database_name, domain_summary=domain_summary)
+        return _run_semantic_compilation(
+            database_name,
+            domain_summary=domain_summary,
+            failures=failures,
+            table_ids=table_ids,
+            protect=protect,
+        )
 
 
 def _run_semantic_compilation(
     database_name: str,
     *,
     domain_summary: DomainSummary | None = None,
+    failures: list[dict] | None = None,
+    table_ids: list[str] | None = None,
+    protect: Callable[[dict], bool] | None = None,
 ) -> int:
     """Body of :func:`run_semantic_compilation`, run under the concurrency bound."""
     summary = domain_summary or load_domain_summary(database_name)
@@ -65,6 +78,9 @@ def _run_semantic_compilation(
         database_name,
         domain_summary=summary,
         embedder=embedder,
+        failures=failures,
+        table_ids=table_ids,
+        protect=protect,
     )
 
     logger.info("=" * 60)

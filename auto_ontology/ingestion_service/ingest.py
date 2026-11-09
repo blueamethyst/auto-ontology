@@ -27,7 +27,6 @@ from auto_ontology.connectors.registry import (
 )
 from auto_ontology.dal.reset import delete_all_data, delete_semantic_layer
 from auto_ontology.infra.feature_flags import is_pii_detection_enabled
-from auto_ontology.ingestion_service.rules import replay_rules
 from auto_ontology.ingestion_service.pii import run_pii_propagation
 from auto_ontology.pii_detection.service import detect_and_tag_pii
 
@@ -169,36 +168,38 @@ def trigger_ingest(connection: dict[str, Any]) -> None:
     database_name = str(connection.get("database") or "")
 
     def _run() -> None:
+        from auto_ontology.ingestion_service.processor import process_database
+        from auto_ontology.ingestion_service.write_lock import write_lock
+
         try:
-            # The connection was just created, so reload the connector cache to
-            # pick it up, then ingest via the same connectors the scheduler uses
-            # (schema filter included).
-            invalidate_connectors_cache()
-            key = database_name.strip().casefold()
-            connector = next(
-                (
-                    c
-                    for c in get_connectors()
-                    if str(getattr(c, "database_name", "")).casefold() == key
-                ),
-                None,
-            )
-            if connector is None:
-                logger.error(
-                    "Ingest skipped: no loaded connector for database %s",
-                    database_name,
+            # Waits for any run in flight (the lock), then reloads the connector
+            # cache -- under the lock, since that closes every connector -- and
+            # runs the common handler, which also compiles new tables and replays
+            # the tagging rules.
+            with write_lock() as lock:
+                invalidate_connectors_cache()
+                key = database_name.strip().casefold()
+                connector = next(
+                    (
+                        c
+                        for c in get_connectors()
+                        if str(getattr(c, "database_name", "")).casefold() == key
+                    ),
+                    None,
                 )
-                return
-            run_ingest(connector)
-            # Unconditional, unlike the ingest pass's own replay: neither
-            # scheduler covers this path. It is a bare thread, and creating a
-            # connection asks for an ingest without asking for a compilation
-            # (see ``server/connections/service.py``), so nothing would label
-            # the database that was just ingested until a scheduler tick hours
-            # later. Runs even when compilation is on, which at worst repeats
-            # work the next semantic pass would have done -- the replay is a
-            # diff and writes nothing where the labels are already right.
-            replay_rules("ingest")
+                if connector is None:
+                    logger.error(
+                        "Ingest skipped: no loaded connector for database %s",
+                        database_name,
+                    )
+                    return
+                report = process_database(connector, "manual", lock=lock)
+                if report.result not in ("succeeded", "skipped"):
+                    logger.error(
+                        "Background ingest %s for database %s",
+                        report.result,
+                        database_name,
+                    )
         except Exception:
             logger.exception(
                 "Background ingest failed for database %s",
@@ -216,8 +217,31 @@ def trigger_delete_ingest(database_name: str | None = None) -> None:
     """Delete a database's ingested graph and embeddings without blocking."""
 
     def _run() -> None:
+        from auto_ontology.dal import schema_state as st
+        from auto_ontology.ingestion_service.write_lock import write_lock
+
         try:
-            delete_all_data(database_name)
+            with write_lock() as lock:
+                run_id = st.start_run(database_name or "<all>", "delete")
+                lock.attach_run(run_id)
+                try:
+                    delete_all_data(database_name)
+                except Exception as exc:
+                    st.finish_run(run_id, st.RESULT_FAILED, error=str(exc))
+                    raise
+                if database_name:
+                    st.upsert_snapshot(
+                        database_name,
+                        applied_signature=None,
+                        applied_rows=None,
+                        last_success_run_id=None,
+                        pending_signature=None,
+                        pending_since=None,
+                        pending_reason=None,
+                    )
+                    st.clear_failure(database_name, "run")
+                    st.bump_generation(database_name)
+                st.finish_run(run_id, st.RESULT_SUCCEEDED)
         except Exception:
             logger.exception(
                 "Background delete-ingest failed for database %s",
@@ -313,7 +337,7 @@ async def _reset_semantic_layer_and_recompile(
                 label,
                 _ABORT_DRAIN_TIMEOUT_S,
             )
-        await asyncio.to_thread(delete_semantic_layer, database_name)
+        await asyncio.to_thread(_locked_delete_semantic_layer, database_name)
     except Exception:
         # Deliberately no rebuild on failure: a pass started now would compile
         # against a half-deleted layer and the result would be neither the old
@@ -327,6 +351,24 @@ async def _reset_semantic_layer_and_recompile(
 
     if not scheduler.start():
         scheduler.trigger()
+
+
+def _locked_delete_semantic_layer(database_name: str | None) -> None:
+    """Delete the semantic layer under the schema ingest write lock, recorded as a run."""
+    from auto_ontology.dal import schema_state as st
+    from auto_ontology.ingestion_service.write_lock import write_lock
+
+    with write_lock() as lock:
+        run_id = st.start_run(database_name or "<all>", "reset")
+        lock.attach_run(run_id)
+        try:
+            delete_semantic_layer(database_name)
+        except Exception as exc:
+            st.finish_run(run_id, st.RESULT_FAILED, error=str(exc))
+            raise
+        if database_name:
+            st.bump_generation(database_name)
+        st.finish_run(run_id, st.RESULT_SUCCEEDED)
 
 
 def trigger_reset_semantic(scheduler: Any, database_name: str | None = None) -> None:

@@ -156,3 +156,87 @@ async def semantic_stop(request: Request) -> dict[str, str]:
     """
     request.app.state.semantic_scheduler.abort()
     return {"status": "accepted"}
+
+
+@router.get("/schema-watch/status")
+async def schema_watch_status() -> dict[str, Any]:
+    """Source-schema watch and ingest handler state, per database (read only)."""
+    import asyncio
+
+    from auto_ontology.dal import schema_state as st
+    from auto_ontology.ingestion_service.data_scheduler import (
+        force_at,
+        min_ingest_gap,
+        watch_enabled,
+        watch_interval,
+    )
+    from auto_ontology.ingestion_service.write_lock import lock_held_elsewhere
+
+    def _collect() -> dict[str, Any]:
+        from sqlalchemy import select
+
+        from auto_ontology.dal import schema as s
+        from auto_ontology.dal.session import store
+
+        databases = [
+            r["database_name"]
+            for r in store().query_read(select(s.schema_snapshot.c.database_name))
+        ]
+        result = {}
+        for database_name in databases:
+            snapshot = st.get_snapshot(database_name) or {}
+            state, generation = st.current_state(database_name)
+            result[database_name] = {
+                "state": state,
+                "generation": generation,
+                "applied_signature": snapshot.get("applied_signature"),
+                "pending_signature": snapshot.get("pending_signature"),
+                "pending_reason": snapshot.get("pending_reason"),
+                "pending_since": snapshot.get("pending_since"),
+                "last_checked_at": snapshot.get("last_checked_at"),
+                "last_success_run_id": snapshot.get("last_success_run_id"),
+                "last_change_ingest_at": snapshot.get("last_change_ingest_at"),
+                "last_force_date": snapshot.get("last_force_date"),
+                "auth_signal": snapshot.get("auth_signal"),
+                "open_failures": st.open_failures(database_name),
+                "orphaned_semantic_objects": st.orphan_count(database_name),
+                "recent_runs": [
+                    {
+                        k: r.get(k)
+                        for k in (
+                            "id",
+                            "trigger",
+                            "stage",
+                            "started_at",
+                            "finished_at",
+                            "result",
+                            "error",
+                        )
+                    }
+                    for r in st.recent_runs(database_name, 5)
+                ],
+            }
+        return {
+            "watch_enabled": watch_enabled(),
+            "interval_minutes": watch_interval().total_seconds() / 60,
+            "min_ingest_gap_minutes": min_ingest_gap().total_seconds() / 60,
+            "force_at": "%02d:%02d" % force_at(),
+            "write_lock_busy": lock_held_elsewhere(),
+            "databases": result,
+        }
+
+    return await asyncio.to_thread(_collect)
+
+
+@router.get("/schema-watch/changes")
+async def schema_watch_changes(
+    database_name: str | None = None, limit: int = 200
+) -> list[dict[str, Any]]:
+    """What ingest runs added, removed or changed, and what happened to semantic objects."""
+    import asyncio
+
+    from auto_ontology.dal import schema_state as st
+
+    return await asyncio.to_thread(
+        st.recent_changes, database_name, max(1, min(limit, 1000))
+    )

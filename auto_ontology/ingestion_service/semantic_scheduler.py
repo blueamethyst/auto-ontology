@@ -76,6 +76,46 @@ _NOTHING_TO_COMPILE = (
 )
 
 
+def _locked_compile(database_name: str) -> int:
+    """One database's compilation under the schema ingest write lock, recorded as a run.
+
+    Table-level failures inside the pipeline are reported back and kept as open
+    failures (``compile_table``) so the ingest handler redoes those tables;
+    previously they were only logged.
+    """
+    from auto_ontology.dal import schema_state as st
+    from auto_ontology.ingestion_service.write_lock import write_lock
+
+    with write_lock() as lock:
+        run_id = st.start_run(database_name, "semantic")
+        lock.attach_run(run_id)
+        failures: list[dict] = []
+        try:
+            count = run_semantic_compilation(database_name, failures=failures)
+        except Exception as exc:
+            st.record_failure(database_name, "compile_post", "", run_id, str(exc))
+            st.finish_run(run_id, st.RESULT_FAILED, error=str(exc))
+            raise
+        for failure in failures:
+            st.record_failure(
+                database_name,
+                failure["stage"],
+                failure["target"],
+                run_id,
+                failure.get("error"),
+            )
+        if not failures:
+            st.clear_failure(database_name, "compile_post")
+        if count:
+            st.bump_generation(database_name)
+        st.finish_run(
+            run_id,
+            st.RESULT_PARTIAL if failures else st.RESULT_SUCCEEDED,
+            {"tables": count, "failures": failures},
+        )
+        return count
+
+
 class SemanticScheduler(IntervalScheduler):
     """Drives semantic compilation on startup, on a 24h timer, and on demand."""
 
@@ -200,7 +240,7 @@ class SemanticScheduler(IntervalScheduler):
                 try:
                     database_started = time.monotonic()
                     tables_processed = await asyncio.to_thread(
-                        run_semantic_compilation, database_name
+                        _locked_compile, database_name
                     )
                     succeeded += 1
                     total_tables += tables_processed

@@ -10,9 +10,11 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import TracebackType
+from typing import Callable
 
 from auto_ontology.dal.datasources import (
     fetch_all_tables_without_term,
+    fetch_compile_tables_by_ids,
     fetch_table_context,
 )
 from auto_ontology.infra.feature_flags import is_distinct_value_probing_enabled
@@ -128,6 +130,9 @@ def compile_semantic_layer(
     *,
     domain_summary: DomainSummary | None = None,
     embedder: SemanticEmbedder | None = None,
+    failures: list[dict] | None = None,
+    table_ids: list[str] | None = None,
+    protect: Callable[[dict], bool] | None = None,
 ) -> int:
     """Run full taxonomy compilation over every table in the store.
 
@@ -140,8 +145,15 @@ def compile_semantic_layer(
     # must not stay un-sampled for this one.
     reset_sampling_breaker(database_name)
     summary = domain_summary or load_domain_summary(database_name)
+    if table_ids is None:
+        candidates = fetch_all_tables_without_term(database_name)
+    else:
+        # Targeted compile (schema ingest handler): the named tables, whether or
+        # not they already have a Term. ``protect`` decides per table whether its
+        # human-written objects must be kept out of the write (see processor).
+        candidates = fetch_compile_tables_by_ids(table_ids)
     tables = sorted(
-        fetch_all_tables_without_term(database_name),
+        candidates,
         key=lambda table: _table_commit_key(database_name, table),
     )
     commit_queue = _OrderedCommitQueue()
@@ -181,6 +193,11 @@ def compile_semantic_layer(
             commit_slot.skip_if_unused()
             return None
         try:
+            if protect is not None and protect(table):
+                logger.info(
+                    "Table %s has human-edited semantic objects; kept as is", table_name
+                )
+                return None
             ctx = fetch_table_context(table["id"])
 
             if not ctx.get("columns"):
@@ -202,8 +219,12 @@ def compile_semantic_layer(
                 probe_distinct_values=is_probe_distinct_values,
                 commit_slot=commit_slot,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Unexpected error processing table %s", table_name)
+            if failures is not None:
+                failures.append(
+                    {"stage": "compile_table", "target": table["id"], "error": str(exc)}
+                )
             return None
         finally:
             commit_slot.skip_if_unused()
@@ -220,6 +241,14 @@ def compile_semantic_layer(
         }
         for future in as_completed(futures):
             result = future.result()
+            if result is not None and result.embed_failed and failures is not None:
+                failures.append(
+                    {
+                        "stage": "compile_table",
+                        "target": futures[future]["id"],
+                        "error": "terms saved but embedding failed",
+                    }
+                )
             if result is not None:
                 count += 1
                 logger.debug(

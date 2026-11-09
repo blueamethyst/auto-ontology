@@ -197,6 +197,89 @@
         "summary": "Ingest Delete"
       }
     },
+    "/schema-watch/changes": {
+      "get": {
+        "description": "What ingest runs added, removed or changed, and what happened to semantic objects.",
+        "operationId": "schema_watch_changes_schema_watch_changes_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "database_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Database Name"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Schema Watch Changes Schema Watch Changes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Schema Watch Changes"
+      }
+    },
+    "/schema-watch/status": {
+      "get": {
+        "description": "Source-schema watch and ingest handler state, per database (read only).",
+        "operationId": "schema_watch_status_schema_watch_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Schema Watch Status Schema Watch Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Schema Watch Status"
+      }
+    },
     "/semantic/compile": {
       "post": {
         "description": "Trigger a non-blocking semantic compilation pass.\n\nEnsures the scheduler is running first (``start()`` is idempotent), so this\nalso takes effect when compilation is enabled while the service is already\nup \u2014 no restart needed. Runs on the scheduler's own task; when it finishes,\nthe next automatic run is rescheduled for 24h later.",

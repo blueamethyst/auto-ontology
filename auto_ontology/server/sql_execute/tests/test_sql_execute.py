@@ -245,6 +245,7 @@ def test_fingerprint_response_and_memo(
 
     monkeypatch.setattr(fp, "compute_fingerprint", compute)
     monkeypatch.setattr(sql_router, "_fingerprint_memo", {})
+    monkeypatch.setattr(sql_router, "_state_and_generation", lambda db: ("ready", None))
     monkeypatch.setenv("AO_BUILD_VERSION", "abc123")
     body = client.get(
         "/api/catalog/fingerprint", params={"target_db": "wow2rpt"}
@@ -269,6 +270,7 @@ def test_fingerprint_unknown_build_warns(
 
     monkeypatch.setattr(fp, "compute_fingerprint", _fake_fp)
     monkeypatch.setattr(sql_router, "_fingerprint_memo", {})
+    monkeypatch.setattr(sql_router, "_state_and_generation", lambda db: ("ready", None))
     monkeypatch.delenv("AO_BUILD_VERSION", raising=False)
     body = client.get(
         "/api/catalog/fingerprint", params={"target_db": "wow2rpt", "fresh": "true"}
@@ -288,3 +290,19 @@ def test_fingerprint_refuses_other_callers(
         "/api/catalog/fingerprint", params={"target_db": "x"}
     )
     assert response.status_code == 403
+
+
+def test_fingerprint_state_and_generation_change_version(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from auto_ontology.dal import fingerprint as fp
+
+    monkeypatch.setattr(fp, "compute_fingerprint", _fake_fp)
+    monkeypatch.setattr(sql_router, "_fingerprint_memo", {})
+    monkeypatch.setattr(sql_router, "_state_and_generation", lambda db: ("ready", 4))
+    a = client.get("/api/catalog/fingerprint", params={"target_db": "x"}).json()
+    monkeypatch.setattr(sql_router, "_state_and_generation", lambda db: ("updating", 5))
+    b = client.get("/api/catalog/fingerprint", params={"target_db": "x"}).json()
+    assert a["generation"] == 4 and b["generation"] == 5
+    assert b["state"] == "updating"
+    assert a["version"] != b["version"]  # memo is bypassed when state/generation move

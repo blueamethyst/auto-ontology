@@ -849,6 +849,28 @@ def fetch_tables_for_schema(
     return rows
 
 
+def fetch_compile_tables_by_ids(table_ids: list[str]) -> list[dict[str, Any]]:
+    """Tables by id, same shape as :func:`fetch_all_tables_without_term`.
+
+    Used by the schema ingest handler's targeted compile, which redoes named
+    tables whether or not they already have a Term.
+    """
+    if not table_ids:
+        return []
+    statement = (
+        select(
+            s.catalog_table.c.id,
+            s.catalog_table.c.name,
+            s.catalog_table.c.description,
+            s.catalog_schema.c.name.label("schema_name"),
+        )
+        .select_from(_table_join())
+        .where(s.catalog_table.c.id.in_(list(table_ids)))
+        .order_by(s.catalog_table.c.name)
+    )
+    return [dict(r) for r in store().query_read(statement)]
+
+
 def fetch_all_tables_without_term(
     database_name: str | None = None,
 ) -> list[dict[str, Any]]:

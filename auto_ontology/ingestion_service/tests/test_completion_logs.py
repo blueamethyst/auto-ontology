@@ -238,32 +238,41 @@ def test_pii_failure_does_not_fail_catalog_ingestion(
     assert "Data ingestion finished successfully for database pagila" in text
 
 
-def test_trigger_ingest_re_applies_the_rules(
+def test_trigger_ingest_runs_the_common_handler(
     _stub_ingest: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Neither scheduler covers this path, so it has to replay them itself.
+    """Creating a connection ingests through the schema ingest handler.
 
-    Creating a connection asks the ingestion service for an ingest and not for
-    a compilation, so without this the database that was just ingested carries
-    no rule's tags until a scheduler tick hours later.
+    Neither scheduler covers this path; the handler compiles new tables and
+    replays the tagging rules itself (``processor._post``), so the database that
+    was just ingested carries the rules' tags without waiting for a tick.
     """
+    import contextlib
+    from types import SimpleNamespace
+
     import auto_ontology.ingestion_service.ingest as mod
+    import auto_ontology.ingestion_service.processor as processor
+    import auto_ontology.ingestion_service.write_lock as write_lock
 
     monkeypatch.setattr(mod, "invalidate_connectors_cache", lambda: None)
     monkeypatch.setattr(mod, "get_connectors", lambda: [_Connector("pagila")])
-    pii_runs: list[bool] = []
     monkeypatch.setattr(
-        mod, "detect_and_tag_pii", lambda _columns: pii_runs.append(True)
+        write_lock, "write_lock", lambda **_: contextlib.nullcontext(object())
     )
-    ran = _stub_rules(monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    def _process(connector: Any, trigger: str, **_: Any) -> Any:
+        calls.append((connector.database_name, trigger))
+        return SimpleNamespace(result="succeeded")
+
+    monkeypatch.setattr(processor, "process_database", _process)
 
     mod.trigger_ingest({"database": "pagila"})
     for thread in threading.enumerate():
         if thread.name == "ingest-pagila":
             thread.join(timeout=10)
 
-    assert ran == [True]
-    assert pii_runs == [True]
+    assert calls == [("pagila", "manual")]
 
 
 # --------------------------------------------------------------------------
@@ -280,9 +289,29 @@ def _patch_data_scheduler(
 ) -> list[bool]:
     import auto_ontology.ingestion_service.data_scheduler as mod
 
+    import contextlib
+    from types import SimpleNamespace
+
+    import auto_ontology.ingestion_service.processor as processor
+    import auto_ontology.ingestion_service.write_lock as write_lock
+
     monkeypatch.setattr(mod, "invalidate_connectors_cache", lambda: None)
     monkeypatch.setattr(mod, "get_connectors", lambda: connectors)
-    monkeypatch.setattr(mod, "run_ingest", run)
+    monkeypatch.setattr(mod, "watch_enabled", lambda: False)
+
+    # Every ingest goes through the schema ingest handler under the write lock;
+    # here the handler just runs ``run`` and reports its outcome.
+    def _process(connector: Any, trigger: str, **_: Any) -> Any:
+        try:
+            run(connector)
+        except Exception:
+            return SimpleNamespace(result="failed")
+        return SimpleNamespace(result="succeeded")
+
+    monkeypatch.setattr(processor, "process_database", _process)
+    monkeypatch.setattr(
+        write_lock, "write_lock", lambda **_: contextlib.nullcontext(object())
+    )
     monkeypatch.setattr(
         mod, "is_semantic_compilation_enabled", lambda: semantic_enabled
     )
@@ -409,6 +438,11 @@ def _patch_semantic_scheduler(
     monkeypatch.setattr(mod, "is_semantic_compilation_enabled", lambda: True)
     monkeypatch.setattr(mod, "resolve_database_names", lambda: databases)
     monkeypatch.setattr(mod, "run_semantic_compilation", run)
+    # The pass compiles each database under the write lock with a run record;
+    # here that wrapper just calls ``run``.
+    monkeypatch.setattr(
+        mod, "_locked_compile", lambda database_name: run(database_name)
+    )
 
     async def _record_propagation(_label: str) -> None:
         _PROPAGATED.append(True)

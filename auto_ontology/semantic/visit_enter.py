@@ -868,6 +868,7 @@ def process_table(
     result_attr_names: list[str] = []
     terms: list = []
     attrs_by_term: dict[str, list[dict]] = defaultdict(list)
+    embed_failed = False
 
     commit_context = commit_slot if commit_slot is not None else _term_commit_lock
     with commit_context:
@@ -896,6 +897,7 @@ def process_table(
                     attrs_by_term[attr["term_name"]].append(attr)
         except Exception:
             logger.warning("[%s] failed to fetch persisted terms", table_name)
+            embed_failed = embedder is not None
 
         if embedder is not None and terms:
             try:
@@ -904,10 +906,12 @@ def process_table(
                         embedder.embed_term(term, attrs_by_term.get(term["name"], []))
             except Exception:
                 logger.warning("[%s] inline embed failed", table_name)
+                embed_failed = True
 
     return ProcessTableResult(
         term_names=result_term_names,
         attr_names=result_attr_names,
+        embed_failed=embed_failed,
     )
 
 

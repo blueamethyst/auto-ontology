@@ -17,6 +17,10 @@ class ProcessTableResult:
 
     term_names: list[str] = field(default_factory=list)
     attr_names: list[str] = field(default_factory=list)
+    #: Set when the Terms were saved but fetching or embedding them failed. A
+    #: plain re-run skips the table (it now has a Term), so the ingest handler
+    #: records this and redoes the table explicitly.
+    embed_failed: bool = False
 
 
 class TermColumnRef(BaseModel):
