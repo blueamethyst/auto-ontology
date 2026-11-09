@@ -544,6 +544,10 @@ def test_force_due_by_date():
     assert force_due({"last_force_date": "2026-11-09"}, at_0500)
     assert not force_due({"last_force_date": "2026-11-10"}, at_0500)
     assert not force_due({"last_force_date": "2026-11-09"}, at_0400)
+    assert not force_due(
+        {"last_force_date": None}, at_0500
+    )  # first run records today instead
+    assert not force_due(None, at_0500)
 
 
 def test_signature_ignores_recreated_identical_table(env):

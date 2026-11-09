@@ -81,11 +81,24 @@ def force_at() -> tuple[int, int]:
 
 
 def force_due(snapshot: dict | None, now: datetime | None = None) -> bool:
+    """Whether today's forced ingest is due.
+
+    No recorded date (first run after deploying the watch) is never due: the
+    caller records today instead, so the first forced ingest is the next
+    scheduled one rather than an immediate full re-embed at deploy time.
+    """
     now = (now or datetime.now(timezone.utc)).astimezone(KST)
+    last = (snapshot or {}).get("last_force_date")
+    if not last:
+        return False
     hour, minute = force_at()
     if (now.hour, now.minute) < (hour, minute):
         return False
-    return (snapshot or {}).get("last_force_date") != now.date().isoformat()
+    return last != now.date().isoformat()
+
+
+def today_kst(now: datetime | None = None) -> str:
+    return (now or datetime.now(timezone.utc)).astimezone(KST).date().isoformat()
 
 
 class DataScheduler(IntervalScheduler):
@@ -222,6 +235,7 @@ class DataScheduler(IntervalScheduler):
                 or "initialised",
                 auth_signal=sig.auth_signal(connector),
                 last_checked_at=now,
+                last_force_date=today_kst(now),
             )
             logger.info(
                 "schema-watch %s: snapshot initialised from current structure "
@@ -231,8 +245,10 @@ class DataScheduler(IntervalScheduler):
             )
             return
 
-        # 3. daily forced ingest
-        if force_due(snapshot, now):
+        # 3. daily forced ingest (a missing date only records today, see force_due)
+        if not snapshot.get("last_force_date"):
+            st.upsert_snapshot(database_name, last_force_date=today_kst(now))
+        elif force_due(snapshot, now):
             logger.info("schema-watch %s: daily forced ingest", database_name)
             process_database(connector, "force")
             return
