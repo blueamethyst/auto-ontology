@@ -180,6 +180,25 @@ class MSSQLDatabase:
             except Exception as exc:  # noqa: BLE001 — never fail a query over the cap
                 logger.warning("Could not set MSSQL query_timeout: %s", exc)
 
+    def _discard_if_dead(self, conn: Any) -> None:
+        """Drop the cached connection when the driver has marked it dead.
+
+        A query timeout (``query_timeout``) or a network drop leaves pymssql's
+        DBPROCESS dead; reusing it fails every later statement with "Not
+        connected to any MS SQL server" until the process restarts. Forget it so
+        the next call reconnects.
+        """
+        raw = getattr(conn, "_conn", None)
+        if raw is None or getattr(raw, "connected", True):
+            return
+        logger.warning("MSSQL connection is dead; reconnecting on next use")
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — already dead
+            pass
+        if self._conn is conn:
+            self._conn = None
+
     @staticmethod
     def _cancel_pending(conn: Any) -> None:
         """Ask the server to stop sending rows we no longer read."""
@@ -245,6 +264,7 @@ class MSSQLDatabase:
 
         except Exception as e:
             logger.error(f"MSSQL execute error: {e}")
+            self._discard_if_dead(conn)
             raise
         finally:
             cursor.close()
@@ -291,6 +311,7 @@ class MSSQLDatabase:
             return result
         except Exception as e:
             logger.error(f"MSSQL execute error: {e}")
+            self._discard_if_dead(conn)
             raise
         finally:
             if stopped_early:

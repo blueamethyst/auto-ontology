@@ -170,3 +170,42 @@ class TestMssqlExecuteLimited:
         conn._conn.query_timeout = 45
         db.execute("SELECT 1")
         assert conn._conn.query_timeout == 0
+
+
+class TestMssqlDeadConnection:
+    def _failing(self, *, connected: bool) -> tuple[mssql.MSSQLDatabase, _FakeConn]:
+        db, conn = _db(1)
+        conn._conn.connected = connected  # type: ignore[attr-defined]
+
+        def boom(sql: str, *args: Any) -> None:
+            if not sql.startswith("SET "):
+                raise RuntimeError("TDS server connection timed out")
+
+        original = conn.cursor
+
+        def cursor(as_dict: bool = False) -> _FakeCursor:
+            c = original(as_dict)
+            c.execute = boom  # type: ignore[method-assign]
+            return c
+
+        conn.cursor = cursor  # type: ignore[method-assign]
+        conn.close = lambda: None  # type: ignore[attr-defined]
+        return db, conn
+
+    def test_dead_connection_is_dropped_after_error(self) -> None:
+        db, _ = self._failing(connected=False)
+        with pytest.raises(RuntimeError):
+            db.execute("SELECT 1", timeout_s=3)
+        assert db._conn is None
+
+    def test_dead_connection_dropped_in_limited_path(self) -> None:
+        db, _ = self._failing(connected=False)
+        with pytest.raises(RuntimeError):
+            db.execute_limited("SELECT 1", preview_rows=1, max_rows=1, timeout_s=3)
+        assert db._conn is None
+
+    def test_live_connection_kept_after_sql_error(self) -> None:
+        db, conn = self._failing(connected=True)
+        with pytest.raises(RuntimeError):
+            db.execute("SELECT broken")
+        assert db._conn is conn
