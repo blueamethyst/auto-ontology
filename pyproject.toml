@@ -34,6 +34,7 @@ dependencies = [
     # large Databricks reads fall back to slow row-by-row Thrift fetches.
     "databricks-sql-connector[pyarrow]>=4.4.0",
     "mysql-connector-python>=26.7.0",
+    "pymssql>=2.3.0",
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.52",
     "alembic>=1.19.1",
