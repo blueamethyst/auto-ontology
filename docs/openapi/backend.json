@@ -4248,6 +4248,19 @@
             "description": "Row cap for this call; never above the server cap.",
             "title": "Max Rows"
           },
+          "preview_rows": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Return only this many rows plus the full count (``total_count``, ``over_limit``) instead of every row. A result over the cap is then reported with ``over_limit`` rather than rejected with 413.",
+            "title": "Preview Rows"
+          },
           "sql": {
             "maxLength": 100000,
             "minLength": 1,
@@ -4269,7 +4282,7 @@
         "type": "object"
       },
       "SqlExecuteResponse": {
-        "description": "Every row of the result.",
+        "description": "Every row of the result, or a preview when ``preview_rows`` was sent.",
         "properties": {
           "columns": {
             "items": {
@@ -4281,6 +4294,11 @@
           "execution_time_ms": {
             "title": "Execution Time Ms",
             "type": "integer"
+          },
+          "over_limit": {
+            "default": false,
+            "title": "Over Limit",
+            "type": "boolean"
           },
           "rows": {
             "items": {
@@ -9246,7 +9264,7 @@
     },
     "/api/sql/execute": {
       "post": {
-        "description": "Run one checked SELECT on a connected database and return every row.\n\nFor a co-located service that needs the full result of a query it already\npreviewed through chat (for example an Excel download). Only callers in\n``AO_SQL_EXECUTE_ALLOWED_IPS`` (default loopback) are served. The statement\nmust be a single SELECT that reads only catalog tables of ``target_db``.\nA result larger than the row cap (``AO_SQL_EXECUTE_MAX_ROWS``, default\n50,000, or ``max_rows`` when lower) is rejected with 413.",
+        "description": "Run one checked SELECT on a connected database and return every row.\n\nFor a co-located service that needs the full result of a query it already\npreviewed through chat (for example an Excel download). Only callers in\n``AO_SQL_EXECUTE_ALLOWED_IPS`` (default loopback) are served. The statement\nmust be a single SELECT that reads only catalog tables of ``target_db``.\nA result larger than the row cap (``AO_SQL_EXECUTE_MAX_ROWS``, default\n50,000, or ``max_rows`` when lower) is rejected with 413. With\n``preview_rows`` only that many rows come back with the full count, and a\nresult over the cap is reported as ``over_limit`` instead (used to refresh a\ncached query's preview without re-running text-to-SQL).",
         "operationId": "execute_sql_api_sql_execute_post",
         "requestBody": {
           "content": {

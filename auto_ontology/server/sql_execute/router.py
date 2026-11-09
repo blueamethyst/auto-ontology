@@ -61,14 +61,24 @@ class SqlExecuteRequest(BaseModel):
         ge=1,
         description="Row cap for this call; never above the server cap.",
     )
+    preview_rows: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Return only this many rows plus the full count (``total_count``, "
+            "``over_limit``) instead of every row. A result over the cap is then "
+            "reported with ``over_limit`` rather than rejected with 413."
+        ),
+    )
 
 
 class SqlExecuteResponse(BaseModel):
-    """Every row of the result."""
+    """Every row of the result, or a preview when ``preview_rows`` was sent."""
 
     columns: list[str]
     rows: list[dict[str, Any]]
     total_count: int
+    over_limit: bool = False
     execution_time_ms: int
 
 
@@ -154,7 +164,10 @@ def execute_sql(
     ``AO_SQL_EXECUTE_ALLOWED_IPS`` (default loopback) are served. The statement
     must be a single SELECT that reads only catalog tables of ``target_db``.
     A result larger than the row cap (``AO_SQL_EXECUTE_MAX_ROWS``, default
-    50,000, or ``max_rows`` when lower) is rejected with 413.
+    50,000, or ``max_rows`` when lower) is rejected with 413. With
+    ``preview_rows`` only that many rows come back with the full count, and a
+    result over the cap is reported as ``over_limit`` instead (used to refresh a
+    cached query's preview without re-running text-to-SQL).
     """
     from auto_ontology.retrieval.text_to_sql.chat_sql import execute_chat_sql_limited
 
@@ -184,7 +197,11 @@ def execute_sql(
             result = execute_chat_sql_limited(
                 connector,
                 request.sql,
-                preview_rows=max_rows,
+                preview_rows=(
+                    max_rows
+                    if request.preview_rows is None
+                    else min(request.preview_rows, max_rows)
+                ),
                 max_rows=max_rows,
                 kind="SQL execute API",
                 timeout_s=timeout_seconds(),
@@ -194,7 +211,7 @@ def execute_sql(
         raise HTTPException(status_code=502, detail=f"Query failed: {exc}") from exc
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-    if result.over_limit:
+    if result.over_limit and request.preview_rows is None:
         raise HTTPException(
             status_code=413,
             detail=f"Result has more than {max_rows} rows; narrow the query.",
@@ -216,5 +233,6 @@ def execute_sql(
         columns=[str(c) for c in frame.columns],
         rows=rows,
         total_count=result.total_count,
+        over_limit=result.over_limit,
         execution_time_ms=elapsed_ms,
     )

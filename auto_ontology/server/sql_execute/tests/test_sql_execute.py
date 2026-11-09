@@ -198,3 +198,24 @@ def test_dates_serialised(client: TestClient, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(sql_router, "catalog_table_names", lambda _db: CATALOG)
     body = _post(client).json()
     assert body["rows"][0]["dt"].startswith("2026-11-09")
+
+
+def test_preview_mode_returns_preview_and_count(
+    client: TestClient, connector: _Connector
+) -> None:
+    body = _post(client, preview_rows=100).json()
+    assert body["total_count"] == 250
+    assert len(body["rows"]) == 100
+    assert body["over_limit"] is False
+    assert connector.calls[-1]["preview_rows"] == 100
+
+
+def test_preview_mode_reports_over_limit_instead_of_413(
+    client: TestClient, connector: _Connector
+) -> None:
+    response = _post(client, preview_rows=10, max_rows=100)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["over_limit"] is True
+    assert body["total_count"] == 100
+    assert len(body["rows"]) == 10
