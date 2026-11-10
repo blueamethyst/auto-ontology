@@ -336,7 +336,6 @@ def impact_and_cleanup(
         s.custom_analysis, s.custom_analysis__sql, s.custom_analysis__sql.c.analysis_id
     )
 
-    semantic_vdb = None
     to_delete_vectors: list[str] = []
 
     def orphan(kind: str, row: dict[str, Any], why: str) -> None:
@@ -412,10 +411,37 @@ def impact_and_cleanup(
         return entries
 
     # Re-check edit state right before deleting (an edit may have landed meanwhile)
-    auto_terms = [t["id"] for t in terms if t["id"] not in shared_terms and _is_auto(t)]
-    auto_attrs = [a["id"] for a in attrs if _is_auto(a)]
-    auto_sql_attrs = [a["id"] for a in sql_attrs if _is_auto(a)]
-    fk_pairs = [(fk["column_id"], fk["attribute_id"]) for fk in incoming_fks]
+    _delete_semantics(
+        report,
+        fk_pairs=[(fk["column_id"], fk["attribute_id"]) for fk in incoming_fks],
+        unlink_terms=list(shared_terms),
+        from_tables=removed_table_ids,
+        attr_ids=[a["id"] for a in attrs if _is_auto(a)],
+        term_ids=[
+            t["id"] for t in terms if t["id"] not in shared_terms and _is_auto(t)
+        ],
+        sql_attr_ids=[a["id"] for a in sql_attrs if _is_auto(a)],
+        vector_ids=to_delete_vectors,
+    )
+    return entries
+
+
+def _delete_semantics(
+    report: RunReport,
+    *,
+    fk_pairs: list[tuple[str, str]],
+    unlink_terms: list[str],
+    from_tables: list[str],
+    attr_ids: list[str],
+    term_ids: list[str],
+    sql_attr_ids: list[str],
+    vector_ids: list[str],
+) -> None:
+    """Delete generated semantic objects and their vectors.
+
+    Rows edited since they were selected are kept (``modified`` re-checked in
+    the delete itself). Shared terms are only unlinked from *from_tables*.
+    """
     for column_id, attribute_id in fk_pairs:
         store().query_write(
             delete(s.column__semantic_fk).where(
@@ -425,48 +451,99 @@ def impact_and_cleanup(
                 )
             )
         )
-    if shared_terms:
+    if unlink_terms:
         store().query_write(
             delete(s.table__term).where(
                 and_(
-                    s.table__term.c.term_id.in_(list(shared_terms)),
-                    s.table__term.c.table_id.in_(removed_table_ids or [""]),
+                    s.table__term.c.term_id.in_(unlink_terms),
+                    s.table__term.c.table_id.in_(from_tables or [""]),
                 )
             )
         )
-    if auto_attrs:
-        store().query_write(
-            delete(s.column_attribute).where(
-                and_(
-                    s.column_attribute.c.id.in_(auto_attrs),
-                    s.column_attribute.c.modified.is_(None),
+    for table, ids in (
+        (s.column_attribute, attr_ids),
+        (s.term, term_ids),
+        (s.sql_attribute, sql_attr_ids),
+    ):
+        if ids:
+            store().query_write(
+                delete(table).where(
+                    and_(table.c.id.in_(ids), table.c.modified.is_(None))
                 )
             )
-        )
-    if auto_terms:
-        store().query_write(
-            delete(s.term).where(
-                and_(s.term.c.id.in_(auto_terms), s.term.c.modified.is_(None))
-            )
-        )
-    if auto_sql_attrs:
-        store().query_write(
-            delete(s.sql_attribute).where(
-                and_(
-                    s.sql_attribute.c.id.in_(auto_sql_attrs),
-                    s.sql_attribute.c.modified.is_(None),
-                )
-            )
-        )
-    if to_delete_vectors:
+    if vector_ids:
         from auto_ontology.vdb import get_semantic_vdb
 
         semantic_vdb = get_semantic_vdb()
-        for node_id in to_delete_vectors:
+        for node_id in vector_ids:
             try:
                 semantic_vdb.delete_by_id(node_id)
             except Exception as exc:  # noqa: BLE001 - recorded, retried next run
                 report.fail("semantic_cleanup", node_id, str(exc))
+
+
+def purge_table_semantics(report: RunReport, table_id: str) -> list[dict[str, Any]]:
+    """Remove a table's generated semantic objects before it is recompiled.
+
+    Compilation upserts Terms and attributes by name, so when the model names a
+    recompiled table differently ("Test Record" -> "Test Watch Record") the old
+    objects stay beside the new ones and the table carries both. Only called
+    for tables ``protected_table`` let through, i.e. ones with no human-written
+    or edited objects; a Term other tables share is unlinked, not deleted. If
+    the recompile then fails, the table has no Term and the follow-up
+    ``run_semantic_compilation`` pass (and the compile retry) rebuilds it.
+    Returns change-log entries.
+    """
+    term_ids = [
+        r["term_id"]
+        for r in store().query_read(
+            select(s.table__term.c.term_id).where(s.table__term.c.table_id == table_id)
+        )
+    ]
+    terms = store().query_read(select(s.term).where(s.term.c.id.in_(term_ids or [""])))
+    shared = {
+        r["term_id"]
+        for r in store().query_read(
+            select(s.table__term.c.term_id).where(
+                and_(
+                    s.table__term.c.term_id.in_(term_ids or [""]),
+                    s.table__term.c.table_id != table_id,
+                )
+            )
+        )
+    }
+    attrs = store().query_read(
+        select(s.column_attribute).where(s.column_attribute.c.table_id == table_id)
+    )
+    attr_ids = [a["id"] for a in attrs if _is_auto(a)]
+    incoming = store().query_read(
+        select(s.column__semantic_fk).where(
+            s.column__semantic_fk.c.attribute_id.in_(attr_ids or [""])
+        )
+    )
+    own_terms = [t for t in terms if t["id"] not in shared and _is_auto(t)]
+    entries = [
+        {
+            "kind": "semantic_replaced",
+            "object": f"{kind}:{row.get('name')}",
+            "detail": {"id": row["id"], "table_id": table_id},
+        }
+        for kind, rows in (
+            ("term", own_terms),
+            ("column_attribute", [a for a in attrs if _is_auto(a)]),
+        )
+        for row in rows
+    ]
+    _delete_semantics(
+        report,
+        fk_pairs=[(fk["column_id"], fk["attribute_id"]) for fk in incoming],
+        unlink_terms=sorted(shared),
+        from_tables=[table_id],
+        attr_ids=attr_ids,
+        term_ids=[t["id"] for t in own_terms],
+        sql_attr_ids=[],
+        vector_ids=[t["id"] for t in own_terms] + attr_ids,
+    )
     return entries
 
 
@@ -614,10 +691,17 @@ def _compile(report: RunReport, d: dict[str, Any], lock: WriteLock) -> None:
     targeted = sorted(set(changed) | set(failed_targets))
     protected: list[str] = []
 
+    replaced: list[dict[str, Any]] = []
+
     def protect(table: dict[str, Any]) -> bool:
         if protected_table(table):
             protected.append(table["id"])
             return True
+        # Not protected: drop its generated objects so the recompile replaces
+        # them instead of adding a second, differently named set.
+        entries = purge_table_semantics(report, table["id"])
+        replaced.extend(entries)
+        st.log_changes(report.run_id, database_name, entries)
         return False
 
     failures: list[dict] = []
@@ -648,6 +732,7 @@ def _compile(report: RunReport, d: dict[str, Any], lock: WriteLock) -> None:
     report.stages["compile"] = {
         "targeted": len(targeted),
         "protected": protected,
+        "replaced_objects": len(replaced),
         "new_tables": new_tables,
         "failed": sorted(failed_now),
     }

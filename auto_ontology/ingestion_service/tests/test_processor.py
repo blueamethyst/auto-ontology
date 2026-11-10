@@ -647,3 +647,98 @@ def test_signal_with_new_schema_key_is_not_a_change():
     assert not processor._signal_changed(before, after)
     assert processor._signal_changed(before, {**after, "login_name": "reader"})
     assert processor._signal_changed({"schema:dbo": [1, 1]}, {"schema:dbo": [0, 1]})
+
+
+def test_recompile_replaces_generated_semantics_of_a_changed_table(
+    env, monkeypatch: pytest.MonkeyPatch
+):
+    """A changed table's old generated Term/attributes do not survive its recompile.
+
+    Compilation upserts by name, so a recompile that names the table differently
+    used to leave both sets on the table (seen live: "Test Record" beside
+    "Test Watch Record"). A Term another table shares is only unlinked.
+    """
+    import auto_ontology.ingestion_service.config as config
+    import auto_ontology.semantic.compile as compile_mod
+    import auto_ontology.semantic.pipeline as pipeline
+
+    c = _connector(env)
+    processor.process_database(c, "new")
+    old = _add_semantics(c.database_name, "t1", "id", human=False)
+    other = _add_semantics(c.database_name, "t0", "id", human=False)
+    # a generated Term linked to both t1 and t0: kept, only unlinked from t1
+    shared_term = store().query_write(
+        insert(s.term)
+        .values(name=f"shared-{uuid.uuid4().hex[:6]}", source="semantic")
+        .returning(s.term.c.id)
+    )[0]["id"]
+    for table_id in (old["table_id"], other["table_id"]):
+        store().query_write(
+            insert(s.table__term).values(table_id=table_id, term_id=shared_term)
+        )
+    live = sig.catalog_rows(c.database_name)[2][("dbo", "t0", "id")]
+    store().query_write(
+        insert(s.column__semantic_fk).values(column_id=live, attribute_id=old["attr"])
+    )
+
+    monkeypatch.setattr(config, "is_semantic_compilation_enabled", lambda: True)
+    monkeypatch.setattr(compile_mod, "build_semantic_embedder", lambda *a, **k: None)
+    monkeypatch.setattr(
+        compile_mod, "run_semantic_compilation", lambda db, failures=None: 0
+    )
+
+    def fake_compile(database_name: str, *, table_ids: list, protect: Any, **_: Any):
+        return sum(not protect({"id": t}) for t in table_ids)
+
+    monkeypatch.setattr(pipeline, "compile_semantic_layer", fake_compile)
+    c.tables["t1"].append(("memo", "nvarchar", True))
+    report = processor.process_database(c, "change")
+    assert report.result == "succeeded", report.failures
+
+    def exists(table: Any, row_id: str) -> bool:
+        return bool(store().query_read(select(table).where(table.c.id == row_id)))
+
+    assert not exists(s.term, old["term"])
+    assert not exists(s.column_attribute, old["attr"])
+    assert exists(s.term, shared_term)  # shared with t0: kept, unlinked from t1
+    links = store().query_read(
+        select(s.table__term.c.table_id).where(s.table__term.c.term_id == shared_term)
+    )
+    assert [r["table_id"] for r in links] == [other["table_id"]]
+    assert exists(s.term, other["term"])  # unchanged table untouched
+    assert exists(s.column_attribute, other["attr"])
+    assert not store().query_read(
+        select(s.column__semantic_fk).where(s.column__semantic_fk.c.column_id == live)
+    )
+    assert (
+        report.stages["compile"]["replaced_objects"] == 2
+    )  # t1's own term + attribute
+    assert sum(k == "semantic_replaced" for k, _ in _changes(c.database_name)) == 2
+
+
+def test_recompile_keeps_human_edited_table_objects(
+    env, monkeypatch: pytest.MonkeyPatch
+):
+    import auto_ontology.ingestion_service.config as config
+    import auto_ontology.semantic.compile as compile_mod
+    import auto_ontology.semantic.pipeline as pipeline
+
+    c = _connector(env)
+    processor.process_database(c, "new")
+    human = _add_semantics(c.database_name, "t2", "id", human=True)
+    monkeypatch.setattr(config, "is_semantic_compilation_enabled", lambda: True)
+    monkeypatch.setattr(compile_mod, "build_semantic_embedder", lambda *a, **k: None)
+    monkeypatch.setattr(
+        compile_mod, "run_semantic_compilation", lambda db, failures=None: 0
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "compile_semantic_layer",
+        lambda db, *, table_ids, protect, **_: [protect({"id": t}) for t in table_ids],
+    )
+    c.tables["t2"].append(("y", "int", True))
+    report = processor.process_database(c, "change")
+    assert report.stages["compile"]["protected"] == [human["table_id"]]
+    assert report.stages["compile"]["replaced_objects"] == 0
+    for table, row_id in ((s.term, human["term"]), (s.column_attribute, human["attr"])):
+        assert store().query_read(select(table).where(table.c.id == row_id))
