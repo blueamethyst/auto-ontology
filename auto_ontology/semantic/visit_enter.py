@@ -42,7 +42,7 @@ from auto_ontology.semantic.term_extractor import (
     apply_display_names_to_specs,
     extract_term,
 )
-from auto_ontology.utils.sql_identifiers import quoted_identifier
+from auto_ontology.utils.sql_identifiers import limited_select, quoted_identifier
 
 if TYPE_CHECKING:
     from auto_ontology.connectors.base import SQLDatabase
@@ -374,12 +374,18 @@ def _distinct_values_if_low_cardinality(
     most-common-values behaviour. The ``LIMIT`` keeps the probe cheap even on
     huge, high-cardinality columns (the scan stops after cap + 1 distinct rows).
     """
-    quoted = quoted_identifier(col_name, getattr(connector, "dialect", None))
+    dialect = getattr(connector, "dialect", None)
+    quoted = quoted_identifier(col_name, dialect)
     try:
         df = _execute_capped(
             connector,
-            f"SELECT DISTINCT {quoted} FROM {qualified} "
-            f"WHERE {quoted} IS NOT NULL LIMIT {cap + 1}",
+            limited_select(
+                quoted,
+                f"FROM {qualified} WHERE {quoted} IS NOT NULL",
+                cap + 1,
+                dialect,
+                distinct=True,
+            ),
         )
     except Exception as exc:
         # Falling back to the row sample's top-N is a fine outcome, but a probe
@@ -460,7 +466,13 @@ def calculate_columns_profiling(
 
     try:
         df = _execute_capped(
-            connector, f"SELECT * FROM {qualified} LIMIT {_PROFILING_SAMPLE_LIMIT}"
+            connector,
+            limited_select(
+                "*",
+                f"FROM {qualified}",
+                _PROFILING_SAMPLE_LIMIT,
+                getattr(connector, "dialect", None),
+            ),
         )
     except Exception as exc:
         _sampling_breaker.record_failure(connector, exc)

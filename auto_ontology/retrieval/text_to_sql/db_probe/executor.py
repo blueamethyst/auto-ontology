@@ -7,7 +7,7 @@
 This is the single choke point for every live query the probing layer issues.
 It guarantees a probe:
 - is a single ``SELECT`` / ``WITH`` statement (no DDL/DML, no multi-statement),
-- is ``LIMIT``-bounded (auto-appended when missing),
+- is row-bounded (``LIMIT``, or ``TOP`` on T-SQL, added when missing),
 - counts against a per-question call budget.
 
 Probes run **inline on the calling thread**. The pipeline's connectors are
@@ -30,6 +30,8 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+import sqlglot
 
 from auto_ontology.connectors.base import SQLDatabase
 
@@ -69,9 +71,25 @@ def is_read_only_select(sql: str) -> bool:
     return True
 
 
-def _ensure_limit(sql: str, max_rows: int) -> str:
-    """Append ``LIMIT max_rows`` when the query has no explicit LIMIT."""
+def _ensure_limit(sql: str, max_rows: int, dialect: Optional[str] = None) -> str:
+    """Bound the probe to *max_rows* when it carries no row cap of its own.
+
+    Most engines take a trailing ``LIMIT``. T-SQL has none -- appending it makes
+    every probe a syntax error on SQL Server -- so there the query is parsed and
+    given ``TOP``, which sqlglot places correctly for CTEs, set operations and
+    ``DISTINCT``. A T-SQL probe that does not parse runs unbounded: the result
+    is still truncated to *max_rows* after fetching, and the connector's query
+    timeout bounds the scan.
+    """
     stripped = sql.strip().rstrip(";").strip()
+    if dialect == "tsql":
+        try:
+            parsed = sqlglot.parse_one(stripped, read="tsql")
+        except Exception:  # noqa: BLE001 -- leave it to the engine to judge
+            return stripped
+        if parsed.args.get("limit") is not None or not hasattr(parsed, "limit"):
+            return stripped
+        return parsed.limit(max_rows).sql(dialect="tsql")
     if _LIMIT_RE.search(stripped):
         return stripped
     return f"{stripped} LIMIT {max_rows}"
@@ -147,7 +165,9 @@ class ProbeExecutor:
             self.log.append(entry)
             return entry
 
-        bounded_sql = _ensure_limit(sql, self.max_rows)
+        bounded_sql = _ensure_limit(
+            sql, self.max_rows, getattr(self.connector, "dialect", None)
+        )
         entry["sql"] = bounded_sql
         self.calls += 1
 

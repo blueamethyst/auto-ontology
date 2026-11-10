@@ -1019,3 +1019,34 @@ def test_the_breaker_key_matches_however_the_database_is_spelled() -> None:
     reset_sampling_breaker("nvdp")
 
     assert not _sampling_breaker.is_open(dead)
+
+
+@patch("auto_ontology.semantic.visit_enter.store_column_date_formats")
+@patch("auto_ontology.semantic.visit_enter.store_column_uniqueness")
+@patch("auto_ontology.semantic.visit_enter.store_column_sample_values")
+def test_profiling_on_mssql_uses_top_not_limit(*_stores: MagicMock) -> None:
+    """SQL Server rejects LIMIT, which made profiling a silent no-op there."""
+    executed: list[str] = []
+    df = pd.DataFrame({"code": ["a", "a", "b"]})
+
+    def _fake_execute(sql: str) -> pd.DataFrame:
+        executed.append(sql)
+        if "DISTINCT" in sql:
+            return pd.DataFrame({"code": ["a", "b"]})
+        return df
+
+    connector = _mock_connector("tsql")
+    connector.execute.side_effect = _fake_execute
+
+    result = calculate_columns_profiling(
+        {"id": "t1", "name": "orders", "schema_name": "dbo"},
+        [{"name": "code", "data_type": "nvarchar"}],
+        connector,
+    )
+
+    assert executed[0] == "SELECT TOP (1000) * FROM [dbo].[orders]"
+    assert executed[1] == (
+        "SELECT DISTINCT TOP (26) [code] FROM [dbo].[orders] WHERE [code] IS NOT NULL"
+    )
+    assert not any("LIMIT" in sql for sql in executed)
+    assert result["code"]["sample_values"] == ["a", "b"]

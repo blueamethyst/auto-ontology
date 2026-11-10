@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from auto_ontology.utils.sql_identifiers import qualified_name, quoted_identifier
+from auto_ontology.utils.sql_identifiers import (
+    limited_select,
+    qualified_name,
+    quoted_identifier,
+)
 
 
 @pytest.mark.parametrize(
@@ -38,3 +42,25 @@ def test_qualified_name_skips_empty_parts() -> None:
     assert qualified_name(None, "raw", "t", dialect="spark") == "`raw`.`t`"
     assert qualified_name(None, None, "t", dialect="spark") == "`t`"
     assert qualified_name("", "raw", "t", dialect="spark") == "`raw`.`t`"
+
+
+def test_limited_select_uses_top_on_tsql() -> None:
+    # SQL Server has no LIMIT; a probe written with it fails to parse there.
+    assert (
+        limited_select("*", "FROM [dbo].[t]", 1000, "tsql")
+        == "SELECT TOP (1000) * FROM [dbo].[t]"
+    )
+    assert (
+        limited_select(
+            "[a]", "FROM [t] WHERE [a] IS NOT NULL", 21, "tsql", distinct=True
+        )
+        == "SELECT DISTINCT TOP (21) [a] FROM [t] WHERE [a] IS NOT NULL"
+    )
+
+
+def test_limited_select_appends_limit_elsewhere() -> None:
+    assert limited_select("*", 'FROM "t"', 5, "postgres") == 'SELECT * FROM "t" LIMIT 5'
+    assert (
+        limited_select('"a"', 'FROM "t"', 2, None, distinct=True)
+        == 'SELECT DISTINCT "a" FROM "t" LIMIT 2'
+    )

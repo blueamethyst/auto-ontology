@@ -51,7 +51,7 @@ from auto_ontology.utils.llm_invoke import (
 from auto_ontology.utils.model_config import resolve
 from auto_ontology.utils.retriever import Retriever
 from auto_ontology.utils.sample_values import stringify_sample_values
-from auto_ontology.utils.sql_identifiers import quoted_identifier
+from auto_ontology.utils.sql_identifiers import limited_select, quoted_identifier
 from auto_ontology.semantic.models import (
     FkHitSelection,
     SemanticFkJoinDefaultSelection,
@@ -125,11 +125,15 @@ def prune_disjoint_semantic_fks(database_name: str) -> int:
         )
         sc = quoted_identifier(row["source_column_name"], dialect)
         tc = quoted_identifier(row["target_column_name"], dialect)
+        present_probe = limited_select(
+            sc, f"FROM {source} WHERE {sc} IS NOT NULL", 1, dialect
+        )
+        shared_probe = limited_select(
+            sc, f"FROM {source} WHERE {sc} IN (SELECT {tc} FROM {target})", 1, dialect
+        )
         sql = (
-            f"SELECT COUNT(*) AS n FROM (SELECT {sc} FROM {source} "
-            f"WHERE {sc} IS NOT NULL LIMIT 1) AS present "
-            f"UNION ALL SELECT COUNT(*) FROM (SELECT {sc} FROM {source} "
-            f"WHERE {sc} IN (SELECT {tc} FROM {target}) LIMIT 1) AS shared"
+            f"SELECT COUNT(*) AS n FROM ({present_probe}) AS present "
+            f"UNION ALL SELECT COUNT(*) FROM ({shared_probe}) AS shared"
         )
         try:
             present, shared = (int(v) for v in connector.execute(sql).iloc[:, 0])

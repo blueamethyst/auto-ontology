@@ -32,6 +32,27 @@ def quoted_identifier(name: str, dialect: str | None = None) -> str:
         return '"' + name.replace('"', '""') + '"'
 
 
+def limited_select(
+    columns: str,
+    rest: str,
+    limit: int,
+    dialect: str | None = None,
+    *,
+    distinct: bool = False,
+) -> str:
+    """Build ``SELECT [DISTINCT] <columns> <rest>`` capped at *limit* rows.
+
+    T-SQL has no ``LIMIT``: a probe written with it fails to parse on SQL
+    Server, so profiling silently returns nothing there. SQL Server takes
+    ``TOP (n)`` after ``DISTINCT``; every other supported engine takes a
+    trailing ``LIMIT n``.
+    """
+    keyword = "SELECT DISTINCT" if distinct else "SELECT"
+    if dialect == "tsql":
+        return f"{keyword} TOP ({int(limit)}) {columns} {rest}"
+    return f"{keyword} {columns} {rest} LIMIT {int(limit)}"
+
+
 def qualified_name(*parts: str | None, dialect: str | None = None) -> str:
     """Join *parts* into a dotted, quoted reference, skipping empty parts.
 

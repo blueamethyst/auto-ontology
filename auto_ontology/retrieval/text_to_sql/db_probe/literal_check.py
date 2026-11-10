@@ -53,6 +53,7 @@ from auto_ontology.retrieval.text_to_sql.db_probe.config import (
     DB_PROBE_LOW_CARD_THRESHOLD,
 )
 from auto_ontology.retrieval.text_to_sql.db_probe.executor import ProbeExecutor
+from auto_ontology.utils.sql_identifiers import limited_select
 
 logger = logging.getLogger(__name__)
 
@@ -282,9 +283,12 @@ def _fetch_distinct(
     """
     table_ref, col_ref = _probe_refs(table_node, col, dialect)
     threshold = DB_PROBE_LOW_CARD_THRESHOLD
-    sql = (
-        f"SELECT DISTINCT {col_ref} AS value FROM {table_ref} "
-        f"WHERE {col_ref} IS NOT NULL LIMIT {threshold + 1}"
+    sql = limited_select(
+        f"{col_ref} AS value",
+        f"FROM {table_ref} WHERE {col_ref} IS NOT NULL",
+        threshold + 1,
+        dialect,
+        distinct=True,
     )
     res = executor.run(sql, purpose="value_check_distinct")
     if not res["ok"] or not res["rows"]:
@@ -310,7 +314,9 @@ def _literal_exists(
     """
     table_ref, col_ref = _probe_refs(table_node, col, dialect)
     lit = exp.Literal.string(literal).sql(dialect=dialect or None)
-    sql = f"SELECT 1 AS hit FROM {table_ref} WHERE {col_ref} = {lit} LIMIT 1"
+    sql = limited_select(
+        "1 AS hit", f"FROM {table_ref} WHERE {col_ref} = {lit}", 1, dialect
+    )
     res = executor.run(sql, purpose="value_check_exact")
     if not res["ok"]:
         return None
@@ -340,10 +346,12 @@ def _fetch_case_variants(
     table_ref, col_ref = _probe_refs(table_node, col, dialect)
     cast_ref = _text_cast(col_ref, dialect)
     lit = exp.Literal.string(literal).sql(dialect=dialect or None)
-    sql = (
-        f"SELECT DISTINCT {col_ref} AS value FROM {table_ref} "
-        f"WHERE LOWER(TRIM({cast_ref})) = LOWER(TRIM({lit})) "
-        f"LIMIT {DB_PROBE_LOW_CARD_THRESHOLD}"
+    sql = limited_select(
+        f"{col_ref} AS value",
+        f"FROM {table_ref} WHERE LOWER(TRIM({cast_ref})) = LOWER(TRIM({lit}))",
+        DB_PROBE_LOW_CARD_THRESHOLD,
+        dialect,
+        distinct=True,
     )
     res = executor.run(sql, purpose="value_check_variants")
     if not res["ok"] or not res["rows"]:
