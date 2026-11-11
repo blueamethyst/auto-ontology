@@ -134,8 +134,8 @@ def _resolve_connector(target_db: str) -> Any:
     )
 
 
-def catalog_table_names(database_name: str) -> set[str]:
-    """Table names the catalog holds for *database_name* (empty if none)."""
+def catalog_table_names(database_name: str) -> set[tuple[str, str]]:
+    """``(schema, table)`` pairs the catalog holds for *database_name* (empty if none)."""
     from auto_ontology.dal.datasources import (
         fetch_schema_ids_for_database,
         fetch_schemas_by_ids,
@@ -146,7 +146,7 @@ def catalog_table_names(database_name: str) -> set[str]:
         # An empty id list means "every schema" to fetch_schemas_by_ids.
         return set()
     return {
-        str(row["table_name"])
+        (str(row.get("table_schema") or ""), str(row["table_name"]))
         for row in fetch_schemas_by_ids(schema_ids)
         if row.get("table_name")
     }
