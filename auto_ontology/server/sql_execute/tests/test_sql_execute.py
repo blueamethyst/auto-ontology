@@ -17,7 +17,7 @@ from auto_ontology.connectors.limited_result import collect_limited
 from auto_ontology.server.sql_execute import router as sql_router
 from auto_ontology.server.sql_execute.checks import SqlCheckError, check_sql
 
-CATALOG = {"bf_rctmst_02", "tb_ordmst", "lu_kind"}
+CATALOG = {("dbo", "bf_rctmst_02"), ("dbo", "tb_ordmst"), ("dbo", "lu_kind")}
 
 
 def _check(sql: str) -> None:
@@ -35,6 +35,18 @@ class TestChecks:
             "SELECT REPLACE(name, ' ', '') AS n FROM lu_kind",
             "SELECT * FROM dbo.lu_kind",
             "SELECT * FROM wow2rpt.dbo.lu_kind",
+            "SELECT * FROM DBO.LU_KIND",
+            # common T-SQL built-ins, typed and anonymous in sqlglot
+            "SELECT ISNULL(LTRIM(RTRIM(name)), '') AS n, LEN(name) AS l, "
+            "CONVERT(VARCHAR(10), sdt, 112) AS d, FORMAT(sdt, 'yyyy-MM') AS m, "
+            "DATEADD(day, 1, sdt) AS t, DATEDIFF(day, sdt, GETDATE()) AS g, "
+            "IIF(kindno > 0, 1, 0) AS f, CHOOSE(1, 'a', 'b') AS c, STR(kindno) AS s "
+            "FROM lu_kind",
+            "SELECT kindno, ROW_NUMBER() OVER (ORDER BY kindno) AS rn, "
+            "STRING_AGG(name, ',') AS names, VAR(kindno) AS v FROM lu_kind GROUP BY kindno",
+            # a CTE that refers to itself and to catalog tables
+            "WITH r AS (SELECT kindno FROM dbo.lu_kind UNION ALL SELECT kindno FROM r) "
+            "SELECT * FROM r",
         ],
     )
     def test_allowed(self, sql: str) -> None:
@@ -55,7 +67,21 @@ class TestChecks:
             "SELECT * FROM otherdb.dbo.lu_kind",
             "SELECT 1",
             "SELECT * FROM OPENQUERY(remote, 'SELECT 1')",
+            "SELECT * FROM OPENROWSET('SQLNCLI', 'Server=x;', 'SELECT 1')",
+            "SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=x').db.dbo.t",
             "not sql at all (",
+            # functions outside the allow-list: server probes, user-defined functions
+            "SELECT HOST_NAME() AS h FROM lu_kind",
+            "SELECT FILEPROPERTY('f', 'SpaceUsed') AS p FROM lu_kind",
+            "SELECT dbo.fn_secret(kindno) AS x FROM lu_kind",
+            "SELECT xp_dirtree('c:\\') AS x FROM lu_kind",
+            # a CTE named like a catalog table must not hide a qualified table elsewhere
+            "WITH lu_kind AS (SELECT 1 AS a) SELECT * FROM secret.lu_kind",
+            "WITH lu_kind AS (SELECT * FROM sys.sql_logins) SELECT * FROM lu_kind",
+            "WITH tb_ordmst AS (SELECT 1 AS a) SELECT * FROM wow2rpt.hr.tb_ordmst",
+            # same table name in a schema that is not in the catalog
+            "SELECT * FROM hr.lu_kind",
+            "SELECT * FROM wow2rpt.hr.lu_kind",
         ],
     )
     def test_rejected(self, sql: str) -> None:
@@ -70,6 +96,30 @@ class TestChecks:
                 database_name="x",
                 catalog_tables=[],
             )
+
+    def test_unqualified_name_needs_one_match_without_default_schema(self) -> None:
+        both = {("dbo", "lu_kind"), ("hr", "lu_kind"), ("dbo", "tb_ordmst")}
+        # T-SQL: unqualified means dbo
+        check_sql(
+            "SELECT * FROM lu_kind",
+            dialect="tsql",
+            database_name="d",
+            catalog_tables=both,
+        )
+        # unknown default schema: ambiguous name is rejected, unique one passes
+        with pytest.raises(SqlCheckError):
+            check_sql(
+                "SELECT * FROM lu_kind",
+                dialect=None,
+                database_name="d",
+                catalog_tables=both,
+            )
+        check_sql(
+            "SELECT * FROM tb_ordmst",
+            dialect=None,
+            database_name="d",
+            catalog_tables=both,
+        )
 
 
 class _Connector:
