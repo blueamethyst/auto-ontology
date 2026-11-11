@@ -41,6 +41,30 @@ class MSSQLQueryTimeoutError(RuntimeError):
     """
 
 
+_STALE_CONNECTION_MARKERS = ("DBPROCESS is dead", "Not connected to any MS SQL server")
+
+
+def _is_stale_connection(exc: Exception) -> bool:
+    """The driver reports a connection that was already dead before this statement.
+
+    A connection dropped while idle (network, server restart, an earlier cancel)
+    is only discovered on the next statement, which then fails at once with
+    DB-Lib 20047. Nothing reached the server, so a read can safely run again on a
+    fresh connection instead of failing the caller's request.
+    """
+    text = str(exc)
+    if "timed out" in text:
+        # The statement itself ran past query_timeout and killed the connection;
+        # running a too-slow query again would only time out again.
+        return False
+    return any(marker in text for marker in _STALE_CONNECTION_MARKERS)
+
+
+def _is_read_statement(sql: str) -> bool:
+    head = sql.lstrip().lstrip("(").lstrip()[:6].upper()
+    return head.startswith("SELECT") or head.startswith("WITH")
+
+
 def _as_query_timeout(
     exc: Exception, timeout_s: Optional[float], elapsed: float
 ) -> Exception:
@@ -246,7 +270,42 @@ class MSSQLDatabase:
         """Return connected database name."""
         return self._config["database"]
 
+    def _drop_connection(self, conn: Any) -> None:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — already dead
+            pass
+        if self._conn is conn:
+            self._conn = None
+
+    def _retry_on_stale(self, run: Any, sql: str) -> Any:
+        """Run *run()*; on a connection found dead before the statement, reconnect once."""
+        conn = self._get_connection()
+        try:
+            return run()
+        except Exception as exc:
+            if not (_is_stale_connection(exc) and _is_read_statement(sql)):
+                raise
+            logger.warning(
+                "MSSQL connection was dead before the statement; reconnecting and "
+                "running it once more"
+            )
+            self._drop_connection(conn)
+            return run()
+
     def execute(
+        self,
+        sql: str,
+        parameters: Optional[list] = None,
+        *,
+        timeout_s: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Execute SQL; a read that hits an already-dead connection is retried once."""
+        return self._retry_on_stale(
+            lambda: self._execute_once(sql, parameters, timeout_s=timeout_s), sql
+        )
+
+    def _execute_once(
         self,
         sql: str,
         parameters: Optional[list] = None,
@@ -301,6 +360,22 @@ class MSSQLDatabase:
             cursor.close()
 
     def execute_limited(
+        self,
+        sql: str,
+        *,
+        preview_rows: int,
+        max_rows: int,
+        timeout_s: Optional[float] = None,
+    ) -> LimitedResult:
+        """Bounded read; a statement that hits an already-dead connection is retried once."""
+        return self._retry_on_stale(
+            lambda: self._execute_limited_once(
+                sql, preview_rows=preview_rows, max_rows=max_rows, timeout_s=timeout_s
+            ),
+            sql,
+        )
+
+    def _execute_limited_once(
         self,
         sql: str,
         *,

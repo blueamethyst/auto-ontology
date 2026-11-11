@@ -381,6 +381,14 @@ wrong column reference, wrong aggregation, bad logic, etc.). Leave \
 search_queries empty."""
 
 
+_ANALYSIS_EVIDENCE_SECTION = """
+
+Authoritative evidence supplied by the caller (mandatory rules):
+{evidence}
+
+Filters, joins and formulas this evidence requires are correct by definition, even when the question does not mention them. Never name them as the root cause and never suggest removing or relaxing them; look for the problem elsewhere."""
+
+
 # ------------------------------------------------------------------
 # Agent
 # ------------------------------------------------------------------
@@ -462,6 +470,12 @@ class SQLReconstructionAgent(BaseAgent):
             known_columns_section=known_columns_section,
             error_context=error_context,
         )
+        # The repair step is told to follow the caller's evidence, but this
+        # diagnosis ran without it and kept naming evidence-required filters
+        # (status codes, a requested year) as "not mandated by the question",
+        # steering every reconstruction into removing them.
+        if evidence := (state.get("evidence") or "").strip():
+            prompt += _ANALYSIS_EVIDENCE_SECTION.format(evidence=evidence)
 
         result = invoke_with_structured_output(
             llm,

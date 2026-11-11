@@ -177,6 +177,33 @@ def _result_limits(state: AgentState) -> tuple[int, int] | None:
     return int(preview_rows), int(max_rows)
 
 
+def _unsafe_statement(sql: str, dialect: str | None) -> str | None:
+    """Why *sql* must not run, or ``None`` when it is a single read-only query.
+
+    The SQL execution API applies these checks (one statement, a query, no DML,
+    DDL, ``SELECT ... INTO``, ``EXEC`` or external table functions) before it
+    runs anything; the chat path executed generated SQL without them. A refusal
+    is returned as an execution error, so reconstruction can rewrite the query.
+    SQL that sqlglot cannot parse still runs when the keyword check finds it
+    read-only, so a parser gap does not block a valid T-SQL answer.
+    """
+    from auto_ontology.retrieval.text_to_sql.db_probe.executor import (
+        is_read_only_select,
+    )
+    from auto_ontology.server.sql_execute.checks import (
+        SqlCheckError,
+        parse_single_query,
+    )
+
+    try:
+        parse_single_query(sql, dialect or None)
+    except SqlCheckError as exc:
+        if str(exc).startswith("SQL could not be parsed") and is_read_only_select(sql):
+            return None
+        return f"Refused to run the generated SQL: {exc}"
+    return None
+
+
 def _run_sql(
     sql: str,
     connector: SQLDatabase | None,
@@ -202,6 +229,11 @@ def _run_sql(
         original_sql = sql
         dialect = getattr(connector, "dialect", "")
         sql = _sanitize_sql_for_dialect(sql, dialect)
+        if refusal := _unsafe_statement(sql, dialect):
+            logger.warning("%s\n  SQL: %s", refusal, sql[:300])
+            return QueryResponse(
+                result=None, sliced=False, error=refusal, statement=sql
+            )
         total_count: Optional[int] = None
         over_limit = False
         sliced = False

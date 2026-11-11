@@ -261,3 +261,60 @@ class TestMssqlQueryTimeout:
         with pytest.raises(RuntimeError) as exc:
             db.execute("SELECT 1", timeout_s=30)
         assert not isinstance(exc.value, mssql.MSSQLQueryTimeoutError)
+
+
+class TestMssqlStaleConnectionRetry:
+    """A connection that died while idle fails the next statement at once; reads retry."""
+
+    def _db_failing_first(self, message: str) -> tuple[mssql.MSSQLDatabase, list[str]]:
+        db, conn = _db(1)
+        calls: list[str] = []
+        original = conn.cursor
+
+        def cursor(as_dict: bool = False) -> _FakeCursor:
+            c = original(as_dict)
+            real = c.execute
+
+            def execute(sql: str, *args: Any) -> None:
+                if not sql.startswith("SET "):
+                    calls.append(sql)
+                    if len(calls) == 1:
+                        raise RuntimeError(message)
+                real(sql, *args)
+
+            c.execute = execute  # type: ignore[method-assign]
+            return c
+
+        conn.cursor = cursor  # type: ignore[method-assign]
+        conn.close = lambda: None  # type: ignore[attr-defined]
+        db._get_connection = lambda: conn  # type: ignore[method-assign]
+        return db, calls
+
+    def test_read_on_dead_connection_runs_once_more(self) -> None:
+        db, calls = self._db_failing_first(
+            "(20047, b'DB-Lib error message 20047, severity 9:\nDBPROCESS is dead or not enabled\n')"
+        )
+        frame = db.execute("SELECT 1")
+        assert len(calls) == 2 and len(frame) == 1
+
+    def test_limited_read_on_dead_connection_runs_once_more(self) -> None:
+        db, calls = self._db_failing_first("DBPROCESS is dead or not enabled")
+        result = db.execute_limited(
+            "WITH x AS (SELECT 1 AS a) SELECT a FROM x", preview_rows=5, max_rows=5
+        )
+        assert len(calls) == 2 and result.total_count == 1
+
+    def test_timeout_is_not_retried(self) -> None:
+        db, calls = self._db_failing_first(
+            "DB-Lib error message 20003: TDS server connection timed out; "
+            "DB-Lib error message 20047: DBPROCESS is dead or not enabled"
+        )
+        with pytest.raises(RuntimeError):
+            db.execute("SELECT 1")
+        assert len(calls) == 1
+
+    def test_write_is_not_retried(self) -> None:
+        db, calls = self._db_failing_first("DBPROCESS is dead or not enabled")
+        with pytest.raises(RuntimeError):
+            db.execute("UPDATE t SET a = 1")
+        assert len(calls) == 1

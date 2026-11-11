@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict
 
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import RunnableLambda
+from auto_ontology.utils.env import positive_int_env
 from auto_ontology.retrieval.text_to_sql.state import (
     TextToSQLPayload,
     AgentState,
@@ -79,7 +80,10 @@ logger = logging.getLogger(__name__)
 NODE_START_EVENT = "step_start"
 
 # Stop after seven reconstruction calls.
-MAX_RECONSTRUCTION_ATTEMPTS = 7
+# Each reconstruction is an LLM round trip (plus probes); a hard question can
+# spend minutes here. Deployments that front the agent with their own retry
+# (or a request timeout) lower it with AO_MAX_RECONSTRUCTION_ATTEMPTS.
+MAX_RECONSTRUCTION_ATTEMPTS = positive_int_env("AO_MAX_RECONSTRUCTION_ATTEMPTS", 7)
 
 
 def route_sql_validation(state: AgentState) -> str:

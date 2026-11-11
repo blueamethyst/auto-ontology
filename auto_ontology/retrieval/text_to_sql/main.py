@@ -9,6 +9,7 @@ from typing import Generator, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from auto_ontology.utils.env import positive_int_env
 from auto_ontology.retrieval.text_to_sql.text_to_sql_graph import (
     NODE_START_EVENT,
     _prediction_enabled,
@@ -69,7 +70,10 @@ app = graph.compile()
 # before execution. See ``_sql_about_to_run``.
 _COMBINED_PRECHECK_IN_GRAPH = "precheck_combined" in graph.nodes
 _TRANSPARENT_NODES = frozenset({"_entry_router"})
-_MAX_FULL_PIPELINE_ATTEMPTS = 2
+# A full attempt re-runs everything from question intent. Configurable with
+# AO_MAX_FULL_PIPELINE_ATTEMPTS (1 = no restart) for deployments with tight
+# request timeouts.
+_MAX_FULL_PIPELINE_ATTEMPTS = positive_int_env("AO_MAX_FULL_PIPELINE_ATTEMPTS", 2)
 _UNCONSTRUCTABLE_NODE = "unconstructable_sql_response"
 
 # Keys created or consumed within one question-to-SQL attempt. A full retry
