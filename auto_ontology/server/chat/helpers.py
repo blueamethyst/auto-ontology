@@ -33,9 +33,9 @@ __all__ = [
 class ChatHistoryTurn(BaseModel):
     """One completed prior turn supplied by a caller that keeps its own history."""
 
-    question: str
-    response: str = ""
-    sql_code: str | None = None
+    question: str = Field(..., max_length=2_000)
+    response: str = Field(default="", max_length=4_000)
+    sql_code: str | None = Field(default=None, max_length=6_000)
 
 
 class ChatRequest(BaseModel):
@@ -61,6 +61,7 @@ class ChatRequest(BaseModel):
     )
     conversation_history: list[ChatHistoryTurn] | None = Field(
         default=None,
+        max_length=20,
         description=(
             "Prior completed turns, oldest first, for callers that store their own "
             "conversation. Used only when ``conversation_id`` is omitted: the "

@@ -561,7 +561,12 @@ async def chat_completions(
     runs the question statelessly: no history, no persisted turn, and no chart
     step (``_build_charts_event`` needs a conversation to save into).
     """
-    logger.info("Chat completions request: %s", request.model_dump())
+    # Prior turns carry earlier answers and SQL; log only how many were sent.
+    logger.info(
+        "Chat completions request: %s (conversation_history turns=%d)",
+        request.model_dump(exclude={"conversation_history"}),
+        len(request.conversation_history or []),
+    )
 
     # Block chat when the semantic layer hasn't been built — no connectors/graph
     # run happens. The chat page gates on the status API; this is the backstop.
