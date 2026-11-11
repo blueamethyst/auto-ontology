@@ -151,7 +151,9 @@ def default_schema_for(dialect: str | None) -> str | None:
     return _DEFAULT_SCHEMAS.get((dialect or "").lower())
 
 
-def referenced_tables(tree: exp.Expression) -> list[exp.Table]:
+def referenced_tables(
+    tree: exp.Expression, dialect: str | None = None
+) -> list[exp.Table]:
     """Physical tables the query reads.
 
     A table node is dropped only when it really refers to a CTE: it has no
@@ -180,7 +182,7 @@ def referenced_tables(tree: exp.Expression) -> list[exp.Table]:
                 and not table.catalog
                 and (
                     table.name.lower() in cte_names
-                    or table.name.lower() in _enclosing_cte_names(table)
+                    or table.name.lower() in _enclosing_cte_names(table, dialect)
                 )
             )
             if not is_cte_ref:
@@ -197,13 +199,22 @@ def referenced_tables(tree: exp.Expression) -> list[exp.Table]:
     return tables
 
 
-def _enclosing_cte_names(node: exp.Expression) -> set[str]:
-    """Names of the CTEs whose body contains *node* (T-SQL recursive self-reference)."""
+def _enclosing_cte_names(node: exp.Expression, dialect: str | None) -> set[str]:
+    """Names of enclosing CTEs that *node* can refer to recursively.
+
+    Only when the CTE really is recursive: always in T-SQL (no RECURSIVE
+    keyword), elsewhere only under ``WITH RECURSIVE``. In a plain ``WITH`` of
+    other dialects ``WITH t AS (SELECT * FROM t)`` reads the physical table
+    ``t``, so it must stay in the catalog check.
+    """
+    tsql = (dialect or "").lower() == "tsql"
     names: set[str] = set()
     parent = node.parent
     while parent is not None:
         if isinstance(parent, exp.CTE):
-            names.add(parent.alias_or_name.lower())
+            with_ = parent.parent
+            if tsql or (isinstance(with_, exp.With) and with_.args.get("recursive")):
+                names.add(parent.alias_or_name.lower())
         parent = parent.parent
     return names
 
@@ -217,6 +228,7 @@ def check_tables_in_catalog(
     database_name: str,
     catalog_tables: Iterable[CatalogTable],
     default_schema: str | None = None,
+    dialect: str | None = None,
 ) -> None:
     """Raise unless every table *tree* reads is a catalog table of *database_name*.
 
@@ -230,7 +242,7 @@ def check_tables_in_catalog(
             f"No catalog tables found for database {database_name!r}; ingest it first."
         )
 
-    tables = referenced_tables(tree)
+    tables = referenced_tables(tree, dialect)
     if not tables:
         raise SqlCheckError("The query does not read any table.")
 
@@ -266,6 +278,10 @@ def check_sql(
     """Run every check; return the parsed query."""
     tree = parse_single_query(sql, dialect)
     check_tables_in_catalog(
-        tree, database_name, catalog_tables, default_schema_for(dialect)
+        tree,
+        database_name,
+        catalog_tables,
+        default_schema_for(dialect),
+        dialect,
     )
     return tree
