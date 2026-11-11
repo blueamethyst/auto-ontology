@@ -94,6 +94,8 @@ from auto_ontology.server.chat.helpers import (
 )
 from auto_ontology.server.chat.conversation_dal import (
     ConversationAccessError,
+    ConversationTurn,
+    bound_history,
     create_stateless_analytics,
     persist_analytics_result,
     persist_assistant_result,
@@ -651,6 +653,25 @@ async def chat_completions(
             )
         except Exception:  # noqa: BLE001 — analytics is best-effort
             logger.exception("Failed to create stateless conversation analytics")
+
+    if request.conversation_id is None and request.conversation_history:
+        # Callers that keep their own conversation (e.g. DABI) send the prior
+        # turns; resolve the follow-up against them without persisting anything.
+        conversation_history = [
+            {
+                "question": turn.question,
+                "response": turn.response,
+                "sql_code": turn.sql_code,
+            }
+            for turn in bound_history(
+                [
+                    ConversationTurn(
+                        question=t.question, response=t.response, sql_code=t.sql_code
+                    )
+                    for t in request.conversation_history
+                ]
+            )
+        ]
 
     worker.submit(
         request.question,

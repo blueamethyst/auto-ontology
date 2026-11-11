@@ -4,7 +4,11 @@
 
 """Unit tests for shaping persisted messages into safe agent context."""
 
-from auto_ontology.server.chat.conversation_dal import _rows_to_history
+from auto_ontology.server.chat.conversation_dal import (
+    ConversationTurn,
+    _rows_to_history,
+    bound_history,
+)
 
 
 def _row(
@@ -87,3 +91,21 @@ def test_one_large_turn_is_bounded() -> None:
 
     turn = history[0]
     assert len(turn.question) + len(turn.response) + len(turn.sql_code or "") <= 12_000
+
+
+def test_bound_history_applies_limits_to_caller_supplied_turns() -> None:
+    turns = [
+        ConversationTurn(question=f" question {index} ", response=f"answer {index}")
+        for index in range(7)
+    ] + [ConversationTurn(question="   ", response="blank question is dropped")]
+
+    history = bound_history(turns)
+
+    assert [turn.question for turn in history] == [
+        "question 2",
+        "question 3",
+        "question 4",
+        "question 5",
+        "question 6",
+    ]
+    assert all(turn.sql_code is None for turn in history)

@@ -77,6 +77,25 @@ def _rows_to_history(rows: list[dict]) -> list[ConversationTurn]:
             )
             pending_question = None
 
+    return bound_history(turns)
+
+
+def bound_history(turns: list[ConversationTurn]) -> list[ConversationTurn]:
+    """Keep the latest turns that fit the turn and character limits, oldest first.
+
+    Shared by persisted conversations and stateless callers that send their own
+    history, so both give the follow-up resolver the same bounded context.
+    """
+
+    turns = [
+        ConversationTurn(
+            question=turn.question.strip()[:_MAX_QUESTION_CHARS],
+            response=turn.response.strip()[:_MAX_RESPONSE_CHARS],
+            sql_code=(turn.sql_code or "")[:_MAX_SQL_CHARS] or None,
+        )
+        for turn in turns
+        if turn.question.strip()
+    ]
     selected: list[ConversationTurn] = []
     used_chars = 0
     for turn in reversed(turns):
@@ -280,6 +299,7 @@ __all__ = [
     "ConversationAccessError",
     "ConversationTurn",
     "PreparedConversation",
+    "bound_history",
     "create_stateless_analytics",
     "persist_analytics_result",
     "persist_assistant_result",
