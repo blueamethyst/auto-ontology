@@ -97,6 +97,26 @@ class TestChecks:
                 catalog_tables=[],
             )
 
+    def test_self_reference_is_a_cte_only_when_recursive(self) -> None:
+        catalog = {("public", "lu_kind")}
+
+        def run(sql: str, dialect: str) -> None:
+            check_sql(sql, dialect=dialect, database_name="d", catalog_tables=catalog)
+
+        # plain WITH outside T-SQL: the inner name is the physical table
+        with pytest.raises(SqlCheckError, match="secret"):
+            run(
+                "WITH secret AS (SELECT * FROM secret) "
+                "SELECT * FROM secret JOIN lu_kind ON 1 = 1",
+                "postgres",
+            )
+        # WITH RECURSIVE: the inner name is the CTE itself
+        run(
+            "WITH RECURSIVE r AS (SELECT 1 AS n FROM lu_kind UNION ALL "
+            "SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+            "postgres",
+        )
+
     def test_unqualified_name_needs_one_match_without_default_schema(self) -> None:
         both = {("dbo", "lu_kind"), ("hr", "lu_kind"), ("dbo", "tb_ordmst")}
         # T-SQL: unqualified means dbo
