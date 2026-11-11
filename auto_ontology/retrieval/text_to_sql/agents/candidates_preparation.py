@@ -229,6 +229,36 @@ logger = logging.getLogger(__name__)
 _GRAPH_NODE_NAME = "prepare_candidates"
 
 
+_EVIDENCE_IDENTIFIER = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+)
+_MAX_EVIDENCE_TABLES = 10
+
+
+def tables_named_in_evidence(evidence: str | None, target_db: str | None) -> list[str]:
+    """Catalog table ids for table names written in *evidence*.
+
+    Only identifiers that look like table names (contain ``_``, as in
+    ``wow2rpt.dbo.bf_rctmst_02`` → ``bf_rctmst_02``) are looked up, at most
+    ten, so prose and column names cost no catalog round trips.
+    """
+    if not evidence or not target_db:
+        return []
+    names: list[str] = []
+    for token in _EVIDENCE_IDENTIFIER.findall(evidence):
+        name = token.rsplit(".", 1)[-1].lower()
+        if "_" in name and name not in names:
+            names.append(name)
+    ids: list[str] = []
+    for name in names[: _MAX_EVIDENCE_TABLES * 3]:
+        table_id = find_table_id_by_name(name, target_db)
+        if table_id and table_id not in ids:
+            ids.append(table_id)
+        if len(ids) >= _MAX_EVIDENCE_TABLES:
+            break
+    return ids
+
+
 class CandidatePreparationAgent(BaseAgent):
     """
     Agent that prepares and fetches all candidates for SQL construction.
@@ -717,6 +747,14 @@ class CandidatePreparationAgent(BaseAgent):
                 len(bridge_paths),
             )
 
+        # A table the caller's authoritative evidence names is required by
+        # definition. When retrieval missed it, SQL generation still followed
+        # the evidence and the hallucinated-table check then rejected every
+        # attempt, ending in "SQL can't be constructed".
+        evidence_table_ids = tables_named_in_evidence(state.get("evidence"), target_db)
+        if evidence_table_ids:
+            forced_table_ids.update(evidence_table_ids)
+
         forced_table_ids -= {t.get("id") for t in relevant_tables}
         if forced_table_ids:
             forced_tables = fetch_tables_by_ids(list(forced_table_ids))
@@ -1171,9 +1209,7 @@ class CandidatePreparationAgent(BaseAgent):
         # the question (e.g., "amt10") exactly matches a column name in a table,
         # that table must NOT be removed — it's likely the table the user needs.
         path_state = state.get("path_state", {})
-        entities = set(
-            str(e).lower() for e in (path_state.get("entities") or []) if e
-        )
+        entities = set(str(e).lower() for e in (path_state.get("entities") or []) if e)
         # Also extract potential column names directly from the question
         # (words that look like column names: contain digits or underscores)
         for word in re.findall(r"\b\w+\b", question.lower()):
@@ -1187,9 +1223,7 @@ class CandidatePreparationAgent(BaseAgent):
                 continue
             columns = table.get("columns") or []
             for col in columns:
-                col_name = (
-                    col.get("name", "").lower() if isinstance(col, dict) else ""
-                )
+                col_name = col.get("name", "").lower() if isinstance(col, dict) else ""
                 if col_name and col_name in entities:
                     entity_protected_tables.add(qname)
                     self.logger.info(
