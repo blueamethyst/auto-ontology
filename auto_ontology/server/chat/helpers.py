@@ -22,11 +22,20 @@ from auto_ontology.retrieval.text_to_sql.node_labels import NODE_LABELS
 
 __all__ = [
     "NODE_LABELS",
+    "ChatHistoryTurn",
     "ChatRequest",
     "build_result_message",
     "charts_to_fenced_content",
     "stringify_sql_response",
 ]
+
+
+class ChatHistoryTurn(BaseModel):
+    """One completed prior turn supplied by a caller that keeps its own history."""
+
+    question: str = Field(..., max_length=2_000)
+    response: str = Field(default="", max_length=4_000)
+    sql_code: str | None = Field(default=None, max_length=6_000)
 
 
 class ChatRequest(BaseModel):
@@ -48,6 +57,16 @@ class ChatRequest(BaseModel):
             "conversation; one owned by another user is rejected with 404. "
             "Omitting it runs the question statelessly, with no history and no "
             "chart step."
+        ),
+    )
+    conversation_history: list[ChatHistoryTurn] | None = Field(
+        default=None,
+        max_length=20,
+        description=(
+            "Prior completed turns, oldest first, for callers that store their own "
+            "conversation. Used only when ``conversation_id`` is omitted: the "
+            "question is resolved against these turns like a persisted follow-up, "
+            "but nothing is persisted. Bounded to the same turn/character limits."
         ),
     )
     # Control prediction routing while preserving information classification:
